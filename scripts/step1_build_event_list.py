@@ -325,7 +325,7 @@ def main():
         if args.resume:
             all_ts = [
                 ts for ts in _build_timestamps(start, end)
-                if not (done_min <= ts.replace(tzinfo=None) <= done_max)
+                if not (done_min.replace(tzinfo=None) <= ts <= done_max.replace(tzinfo=None))
             ]
             log.info("Resuming: %d timestamps remaining", len(all_ts))
         else:
