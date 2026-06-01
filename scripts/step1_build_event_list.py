@@ -307,6 +307,10 @@ def main():
     parser.add_argument("--out",        default="events.csv")
     parser.add_argument("--raw",        default="data/raw_reports.parquet",
                         help="Streaming Parquet of all extracted reports (kept for reuse)")
+    parser.add_argument("--resume",     action="store_true",
+                        help="Skip timestamps already covered in existing Parquet")
+    parser.add_argument("--overwrite",  action="store_true",
+                        help="Ignore existing Parquet and download everything fresh")
     args = parser.parse_args()
 
     start = datetime.strptime(args.start, "%Y-%m-%d")
@@ -316,17 +320,16 @@ def main():
 
     # --- Step A: download (or resume) ---
     done_min, done_max = already_downloaded_range(raw_path)
-    if done_min and done_max:
+    if done_min and done_max and not args.overwrite:
         log.info("Existing raw data covers %s → %s", done_min.date(), done_max.date())
-        resume = input("Resume (skip already-downloaded range)? [y/n]: ").strip().lower()
-        if resume == "y":
-            # Only fetch timestamps outside the already-covered range
+        if args.resume:
             all_ts = [
                 ts for ts in _build_timestamps(start, end)
                 if not (done_min <= ts.replace(tzinfo=None) <= done_max)
             ]
             log.info("Resuming: %d timestamps remaining", len(all_ts))
         else:
+            log.info("Use --resume to skip existing data or --overwrite to start fresh.")
             all_ts = _build_timestamps(start, end)
     else:
         all_ts = _build_timestamps(start, end)
