@@ -61,7 +61,13 @@ def pull_event(row: pd.Series, ds_full: xr.Dataset, out_dir: Path):
         ds_event.to_netcdf(out_path)
         log.info("Event %d ERA5 saved (%s)", row["event_id"], out_path.name)
     except Exception as e:
-        log.warning("Event %d ERA5 failed: %s", row["event_id"], e)
+        available = ds_full.level.values.tolist() if "level" in str(e) else None
+        if available:
+            missing = [l for l in LEVELS if l not in available]
+            log.warning("Event %d ERA5 failed: %s | requested levels: %s | missing from store: %s",
+                        row["event_id"], e, LEVELS, missing)
+        else:
+            log.warning("Event %d ERA5 failed: %s", row["event_id"], e)
 
 
 def main():
