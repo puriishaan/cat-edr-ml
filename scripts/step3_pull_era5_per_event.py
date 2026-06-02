@@ -43,8 +43,8 @@ def pull_event(row: pd.Series, ds_full: xr.Dataset, out_dir: Path):
         log.info("Event %d ERA5 already exists, skipping", row["event_id"])
         return
 
-    start = pd.to_datetime(row["start_utc"]) - pd.Timedelta(hours=TIME_PAD_HR)
-    end   = pd.to_datetime(row["end_utc"])   + pd.Timedelta(hours=TIME_PAD_HR)
+    start = pd.to_datetime(row["start_utc"], utc=True).tz_localize(None) - pd.Timedelta(hours=TIME_PAD_HR)
+    end   = pd.to_datetime(row["end_utc"],   utc=True).tz_localize(None) + pd.Timedelta(hours=TIME_PAD_HR)
 
     # ERA5 longitude is 0-360; convert event box if needed
     lon_min = float(row["lon_min"]) % 360
