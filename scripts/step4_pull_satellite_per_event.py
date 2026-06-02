@@ -78,7 +78,7 @@ def _pull_abi(fs, t: pd.Timestamp, bucket: str, row: pd.Series) -> dict | None:
     for fpath in files:
         try:
             with fs.open(fpath) as f:
-                ds = xr.open_dataset(f, engine="scipy")
+                ds = xr.open_dataset(f, engine="netcdf4")
             x_min, y_min = _latlon_to_xy(float(row["lat_min"]) - BOX_PAD_DEG,
                                           float(row["lon_min"]) - BOX_PAD_DEG, ds)
             x_max, y_max = _latlon_to_xy(float(row["lat_max"]) + BOX_PAD_DEG,
@@ -135,7 +135,7 @@ def _pull_goes13(fs, t: pd.Timestamp, row: pd.Series) -> dict | None:
     for fpath in files:
         try:
             with fs.open(fpath) as f:
-                ds = xr.open_dataset(f, engine="scipy")
+                ds = xr.open_dataset(f, engine="netcdf4")
 
             # GOES-13 files have lat/lon coordinates directly
             # Find IR channel variable — typically 'IR' or 'data' or channel 4
