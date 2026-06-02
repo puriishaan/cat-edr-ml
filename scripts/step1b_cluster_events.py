@@ -110,16 +110,19 @@ def main():
     parser.add_argument("--top", type=int, default=150)
     args = parser.parse_args()
 
-    log.info("Loading raw reports...")
-    df = pd.read_parquet(args.raw)
-    log.info("Total rows: %d", len(df))
-    log.info("EDR distribution:\n%s",
-             df["MEDEDR"].describe(percentiles=[.1,.25,.5,.75,.9,.99]).to_string())
-
-    # Filter to turbulent only for clustering
-    df_turb = df[df["MEDEDR"] >= EDR_CLUSTER_MIN].copy()
-    log.info("Turbulent rows (MEDEDR >= %.2f): %d", EDR_CLUSTER_MIN, len(df_turb))
-    del df  # free RAM immediately
+    log.info("Loading turbulent rows only (MEDEDR >= %.2f)...", EDR_CLUSTER_MIN)
+    # Use filters parameter to push filtering into parquet reader — never loads full dataset
+    import pyarrow.parquet as pq
+    import pyarrow as pa
+    pf = pq.ParquetFile(args.raw)
+    chunks = []
+    for batch in pf.iter_batches(batch_size=1_000_000):
+        df_chunk = batch.to_pandas()
+        df_chunk = df_chunk[df_chunk["MEDEDR"] >= EDR_CLUSTER_MIN]
+        if len(df_chunk) > 0:
+            chunks.append(df_chunk)
+    df_turb = pd.concat(chunks, ignore_index=True)
+    log.info("Turbulent rows loaded: %d", len(df_turb))
 
     log.info("Clustering %d turbulent reports...", len(df_turb))
     df_turb = cluster_reports(df_turb)
