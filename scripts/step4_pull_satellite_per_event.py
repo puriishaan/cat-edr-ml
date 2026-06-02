@@ -209,8 +209,8 @@ def pull_event(row: pd.Series, fs: s3fs.S3FileSystem, out_dir: Path):
         log.info("Event %d satellite already exists, skipping", row["event_id"])
         return
 
-    start = pd.to_datetime(row["start_utc"]).tz_localize("UTC") - pd.Timedelta(minutes=TIME_PAD_MIN)
-    end   = pd.to_datetime(row["end_utc"]).tz_localize("UTC")   + pd.Timedelta(minutes=TIME_PAD_MIN)
+    start = pd.to_datetime(row["start_utc"], utc=True) - pd.Timedelta(minutes=TIME_PAD_MIN)
+    end   = pd.to_datetime(row["end_utc"],   utc=True) + pd.Timedelta(minutes=TIME_PAD_MIN)
     era   = _era(start.year)
 
     if era == "none":
