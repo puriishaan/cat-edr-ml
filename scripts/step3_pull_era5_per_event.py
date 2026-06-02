@@ -22,7 +22,7 @@ log = logging.getLogger(__name__)
 ARCO_URI = "gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3"
 
 # Cruise altitude pressure levels (hPa)
-LEVELS = [150, 175, 200, 225, 250, 275, 300, 350, 400, 500]
+LEVELS = [150, 175, 200, 225, 250, 300, 350, 400, 500]
 
 # Variables needed for CAT diagnostics (TI1, TI2, Ri, N², frontogenesis)
 VARIABLES = [
