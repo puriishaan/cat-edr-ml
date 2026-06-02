@@ -87,9 +87,12 @@ def _url(ts: datetime) -> str:
 
 
 def _parse(content: bytes) -> pd.DataFrame | None:
+    import warnings
     try:
-        with gzip.open(BytesIO(content)) as f:
-            ds = xr.open_dataset(f, engine="scipy")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with gzip.open(BytesIO(content)) as f:
+                ds = xr.open_dataset(f, engine="scipy")
     except Exception:
         return None
 
