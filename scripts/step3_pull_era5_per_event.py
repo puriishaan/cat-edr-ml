@@ -80,6 +80,13 @@ def main():
         chunks=None,
         storage_options={"token": "anon"},
     )
+    available_levels = ds_full.level.values.tolist()
+    log.info("Available pressure levels: %s", available_levels)
+
+    # Use only levels that exist in the dataset
+    global LEVELS
+    LEVELS = [l for l in LEVELS if l in available_levels]
+    log.info("Using levels: %s", LEVELS)
     log.info("ERA5 store opened. Pulling %d events...", len(events))
 
     for _, row in events.iterrows():
