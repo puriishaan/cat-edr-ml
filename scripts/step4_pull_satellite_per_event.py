@@ -1,9 +1,13 @@
 """
-Step 4 — Pull GOES Band 13 brightness temperature per event (anonymous S3, no API key).
-Uses GOES-16 (pre-2025) and GOES-19 (2025+) from the NOAA public S3 bucket.
-Crops to event bounding box immediately — never stores full-disk images.
+Step 4 — Pull IR brightness temperature per event (anonymous S3, no API key).
 
-No API key required — NOAA GOES S3 buckets are publicly accessible anonymously.
+Satellite coverage by era:
+  pre-2010:   No suitable public S3 data → skip, mark NaN
+  2010-2017:  GOES-13 (GOES-East), Channel 4 (10.7 µm IR window)
+  2017-2025:  GOES-16 ABI L2-CMIPF, Band 13 (10.3 µm)
+  2025+:      GOES-19 ABI L2-CMIPF, Band 13 (10.3 µm)
+
+Crops to event bounding box immediately — never stores full-disk images.
 
 Usage:
     python scripts/step4_pull_satellite_per_event.py --events events.csv --out data/satellite/
@@ -21,15 +25,30 @@ import xarray as xr
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
-# GOES-19 became operational GOES-East in early 2025
-def _goes_bucket(year: int) -> str:
-    return "noaa-goes19" if year >= 2025 else "noaa-goes16"
-
-TIME_PAD_MIN = 30   # fetch satellite images within ±30 min of event window
-BOX_PAD_DEG  = 0.5  # extra padding on satellite crop
+TIME_PAD_MIN = 30
+BOX_PAD_DEG  = 0.5
 
 
-def _goes_files(fs: s3fs.S3FileSystem, dt: pd.Timestamp, bucket: str) -> list[str]:
+# ---------------------------------------------------------------------------
+# Satellite era routing
+# ---------------------------------------------------------------------------
+
+def _era(year: int) -> str:
+    if year < 2010:
+        return "none"
+    elif year < 2018:
+        return "goes13"
+    elif year < 2025:
+        return "goes16"
+    else:
+        return "goes19"
+
+
+# ---------------------------------------------------------------------------
+# GOES-16/19 ABI L2-CMIPF (2017+)
+# ---------------------------------------------------------------------------
+
+def _abi_files(fs, dt: pd.Timestamp, bucket: str) -> list[str]:
     doy = dt.timetuple().tm_yday
     pattern = f"s3://{bucket}/ABI-L2-CMIPF/{dt.year}/{doy:03d}/{dt.hour:02d}/*C13*.nc"
     try:
@@ -39,7 +58,6 @@ def _goes_files(fs: s3fs.S3FileSystem, dt: pd.Timestamp, bucket: str) -> list[st
 
 
 def _latlon_to_xy(lat: float, lon: float, ds: xr.Dataset):
-    """Convert lat/lon to GOES fixed-grid (x, y) in radians."""
     import pyproj
     proj_info = ds["goes_imager_projection"]
     p = pyproj.Proj(
@@ -53,18 +71,154 @@ def _latlon_to_xy(lat: float, lon: float, ds: xr.Dataset):
     return x_m / h, y_m / h
 
 
+def _pull_abi(fs, t: pd.Timestamp, bucket: str, row: pd.Series) -> dict | None:
+    files = _abi_files(fs, t, bucket)
+    if not files:
+        return None
+    for fpath in files:
+        try:
+            with fs.open(fpath) as f:
+                ds = xr.open_dataset(f, engine="scipy")
+            x_min, y_min = _latlon_to_xy(float(row["lat_min"]) - BOX_PAD_DEG,
+                                          float(row["lon_min"]) - BOX_PAD_DEG, ds)
+            x_max, y_max = _latlon_to_xy(float(row["lat_max"]) + BOX_PAD_DEG,
+                                          float(row["lon_max"]) + BOX_PAD_DEG, ds)
+            cropped = ds["CMI"].sel(
+                x=slice(min(x_min, x_max), max(x_min, x_max)),
+                y=slice(max(y_min, y_max), min(y_min, y_max)),
+            )
+            if cropped.size == 0:
+                continue
+            scan_time = pd.to_datetime(
+                ds["t"].values, unit="s",
+                origin=pd.Timestamp("2000-01-01 12:00:00"), utc=True
+            )
+            return {
+                "scan_time": scan_time,
+                "tb_min":    float(cropped.min()),
+                "tb_max":    float(cropped.max()),
+                "tb_mean":   float(cropped.mean()),
+                "tb_std":    float(cropped.std()),
+                "source":    fpath,
+            }
+        except Exception as e:
+            log.debug("ABI file error %s: %s", fpath, e)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# GOES-13 (2010-2017)
+# GOES-13 S3 bucket: noaa-goes13
+# Path: GOES13/YYYY/DDD/HH/goes13.YYYY.DDD.HHMM.G.nc
+# IR window is Channel 4 (~10.7 µm), variable name varies by file
+# ---------------------------------------------------------------------------
+
+def _goes13_files(fs, dt: pd.Timestamp) -> list[str]:
+    doy = dt.timetuple().tm_yday
+    pattern = f"s3://noaa-goes13/GOES13/{dt.year}/{doy:03d}/{dt.hour:02d}/*.nc"
+    try:
+        return sorted(fs.glob(pattern))
+    except Exception:
+        return []
+
+
+def _pull_goes13(fs, t: pd.Timestamp, row: pd.Series) -> dict | None:
+    files = _goes13_files(fs, t)
+    if not files:
+        return None
+
+    lat_min = float(row["lat_min"]) - BOX_PAD_DEG
+    lat_max = float(row["lat_max"]) + BOX_PAD_DEG
+    lon_min = float(row["lon_min"]) - BOX_PAD_DEG
+    lon_max = float(row["lon_max"]) + BOX_PAD_DEG
+
+    for fpath in files:
+        try:
+            with fs.open(fpath) as f:
+                ds = xr.open_dataset(f, engine="scipy")
+
+            # GOES-13 files have lat/lon coordinates directly
+            # Find IR channel variable — typically 'IR' or 'data' or channel 4
+            ir_var = None
+            for candidate in ["IR", "IR_WV", "data", "channel_4", "ch4"]:
+                if candidate in ds.data_vars:
+                    ir_var = candidate
+                    break
+            if ir_var is None:
+                # Try first non-coordinate variable
+                candidates = [v for v in ds.data_vars
+                              if ds[v].ndim >= 2]
+                if candidates:
+                    ir_var = candidates[0]
+                else:
+                    continue
+
+            da = ds[ir_var]
+
+            # Crop by lat/lon if coordinates exist
+            if "lat" in ds.coords and "lon" in ds.coords:
+                da = da.where(
+                    (ds.lat >= lat_min) & (ds.lat <= lat_max) &
+                    (ds.lon >= lon_min) & (ds.lon <= lon_max),
+                    drop=True
+                )
+            elif "latitude" in ds.coords and "longitude" in ds.coords:
+                da = da.where(
+                    (ds.latitude >= lat_min) & (ds.latitude <= lat_max) &
+                    (ds.longitude >= lon_min) & (ds.longitude <= lon_max),
+                    drop=True
+                )
+
+            if da.size == 0 or float(da.count()) == 0:
+                continue
+
+            # Convert to Kelvin if needed (GOES-13 may store as counts or Celsius)
+            vals = da.values.astype(float)
+            vals = vals[~np.isnan(vals)]
+            if len(vals) == 0:
+                continue
+
+            # Heuristic: if values look like counts (0-1023) convert to K
+            if vals.max() < 400 and vals.min() >= 0:
+                pass  # already looks like K or close
+            elif vals.max() > 1000:
+                # Raw counts — skip, can't convert without calibration table
+                continue
+
+            scan_time = pd.Timestamp(t, tz="UTC")
+            return {
+                "scan_time": scan_time,
+                "tb_min":    float(vals.min()),
+                "tb_max":    float(vals.max()),
+                "tb_mean":   float(vals.mean()),
+                "tb_std":    float(vals.std()),
+                "source":    fpath,
+            }
+        except Exception as e:
+            log.debug("GOES-13 file error %s: %s", fpath, e)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Main event puller
+# ---------------------------------------------------------------------------
+
 def pull_event(row: pd.Series, fs: s3fs.S3FileSystem, out_dir: Path):
     out_path = out_dir / f"event_{int(row['event_id']):04d}.parquet"
     if out_path.exists():
         log.info("Event %d satellite already exists, skipping", row["event_id"])
         return
 
-    start = pd.to_datetime(row["start_utc"]) - pd.Timedelta(minutes=TIME_PAD_MIN)
-    end   = pd.to_datetime(row["end_utc"])   + pd.Timedelta(minutes=TIME_PAD_MIN)
+    start = pd.to_datetime(row["start_utc"]).tz_localize("UTC") - pd.Timedelta(minutes=TIME_PAD_MIN)
+    end   = pd.to_datetime(row["end_utc"]).tz_localize("UTC")   + pd.Timedelta(minutes=TIME_PAD_MIN)
+    era   = _era(start.year)
 
-    # Collect all timestamps in the event window (GOES scans every 10 min)
+    if era == "none":
+        log.warning("Event %d — pre-2010, no public satellite data available", row["event_id"])
+        return
+
     times = pd.date_range(start.floor("10min"), end.ceil("10min"), freq="10min")
-    bucket = _goes_bucket(start.year)
+    bucket = {"goes13": "noaa-goes13", "goes16": "noaa-goes16", "goes19": "noaa-goes19"}[era]
 
     records = []
     seen_hours = set()
@@ -75,62 +229,22 @@ def pull_event(row: pd.Series, fs: s3fs.S3FileSystem, out_dir: Path):
             continue
         seen_hours.add(hour_key)
 
-        files = _goes_files(fs, t, bucket)
-        if not files:
-            continue
+        if era in ("goes16", "goes19"):
+            rec = _pull_abi(fs, t, bucket, row)
+        else:
+            rec = _pull_goes13(fs, t, row)
 
-        # Pick the file closest to t
-        for fpath in files:
-            try:
-                with fs.open(fpath) as f:
-                    ds = xr.open_dataset(f, engine="scipy")
-
-                # Crop to event bounding box
-                # GOES uses fixed-grid (x, y) in radians — convert bbox corners
-                x_min, y_min = _latlon_to_xy(
-                    float(row["lat_min"]) - BOX_PAD_DEG,
-                    float(row["lon_min"]) - BOX_PAD_DEG, ds
-                )
-                x_max, y_max = _latlon_to_xy(
-                    float(row["lat_max"]) + BOX_PAD_DEG,
-                    float(row["lon_max"]) + BOX_PAD_DEG, ds
-                )
-
-                cropped = ds["CMI"].sel(
-                    x=slice(min(x_min, x_max), max(x_min, x_max)),
-                    y=slice(max(y_min, y_max), min(y_min, y_max)),
-                )
-
-                if cropped.size == 0:
-                    continue
-
-                # Parse scan start time from dataset
-                scan_time = pd.to_datetime(
-                    ds["t"].values, unit="s",
-                    origin=pd.Timestamp("2000-01-01 12:00:00"), utc=True
-                )
-
-                records.append({
-                    "scan_time":    scan_time,
-                    "tb_min":       float(cropped.min()),
-                    "tb_max":       float(cropped.max()),
-                    "tb_mean":      float(cropped.mean()),
-                    "tb_std":       float(cropped.std()),
-                    "source_file":  fpath,
-                })
-                break  # one file per 10-min slot is enough
-
-            except Exception as e:
-                log.debug("Could not open %s: %s", fpath, e)
-                continue
+        if rec:
+            records.append(rec)
 
     if records:
         df = pd.DataFrame(records)
         df["event_id"] = int(row["event_id"])
+        df["satellite"] = era
         df.to_parquet(out_path, index=False)
-        log.info("Event %d — %d satellite snapshots saved", row["event_id"], len(df))
+        log.info("Event %d (%s) — %d snapshots saved", row["event_id"], era, len(df))
     else:
-        log.warning("Event %d — no satellite data found", row["event_id"])
+        log.warning("Event %d (%s, %d) — no satellite data found", row["event_id"], era, start.year)
 
 
 def main():
@@ -143,10 +257,10 @@ def main():
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    log.info("Connecting to NOAA GOES S3 (anonymous)...")
+    log.info("Connecting to NOAA S3 (anonymous)...")
     fs = s3fs.S3FileSystem(anon=True)
 
-    log.info("Pulling satellite Band 13 for %d events...", len(events))
+    log.info("Pulling satellite IR for %d events...", len(events))
     for _, row in events.iterrows():
         pull_event(row, fs, out_dir)
 
