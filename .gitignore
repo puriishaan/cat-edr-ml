@@ -51,3 +51,9 @@ Thumbs.db
 
 # --- CDS API key (never commit credentials) ---
 .cdsapirc
+
+# --- Runtime logs ---
+*.log
+
+# --- Intermediate CNN checkpoint (best is promoted to cat_cnn.npz) ---
+models/cat_cnn_best.npz

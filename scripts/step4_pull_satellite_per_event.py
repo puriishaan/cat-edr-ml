@@ -14,6 +14,7 @@ Usage:
 """
 
 import argparse
+import io
 import logging
 from pathlib import Path
 
@@ -77,8 +78,9 @@ def _pull_abi(fs, t: pd.Timestamp, bucket: str, row: pd.Series) -> dict | None:
         return None
     for fpath in files:
         try:
-            with fs.open(fpath) as f:
-                ds = xr.open_dataset(f, engine="netcdf4")
+            with fs.open(fpath, "rb") as f:
+                raw = f.read()
+            ds = xr.open_dataset(io.BytesIO(raw), engine="h5netcdf")
             x_min, y_min = _latlon_to_xy(float(row["lat_min"]) - BOX_PAD_DEG,
                                           float(row["lon_min"]) - BOX_PAD_DEG, ds)
             x_max, y_max = _latlon_to_xy(float(row["lat_max"]) + BOX_PAD_DEG,
@@ -89,10 +91,7 @@ def _pull_abi(fs, t: pd.Timestamp, bucket: str, row: pd.Series) -> dict | None:
             )
             if cropped.size == 0:
                 continue
-            scan_time = pd.to_datetime(
-                ds["t"].values, unit="s",
-                origin=pd.Timestamp("2000-01-01 12:00:00"), utc=True
-            )
+            scan_time = pd.Timestamp(ds["t"].values).tz_localize("UTC")
             return {
                 "scan_time": scan_time,
                 "tb_min":    float(cropped.min()),
@@ -118,6 +117,8 @@ def _goes13_files(fs, dt: pd.Timestamp) -> list[str]:
     pattern = f"s3://noaa-goes13/GOES13/{dt.year}/{doy:03d}/{dt.hour:02d}/*.nc"
     try:
         return sorted(fs.glob(pattern))
+    except PermissionError:
+        raise
     except Exception:
         return []
 
@@ -223,19 +224,24 @@ def pull_event(row: pd.Series, fs: s3fs.S3FileSystem, out_dir: Path):
     records = []
     seen_hours = set()
 
-    for t in times:
-        hour_key = (t.year, t.timetuple().tm_yday, t.hour)
-        if hour_key in seen_hours:
-            continue
-        seen_hours.add(hour_key)
+    try:
+        for t in times:
+            hour_key = (t.year, t.timetuple().tm_yday, t.hour)
+            if hour_key in seen_hours:
+                continue
+            seen_hours.add(hour_key)
 
-        if era in ("goes16", "goes19"):
-            rec = _pull_abi(fs, t, bucket, row)
-        else:
-            rec = _pull_goes13(fs, t, row)
+            if era in ("goes16", "goes19"):
+                rec = _pull_abi(fs, t, bucket, row)
+            else:
+                rec = _pull_goes13(fs, t, row)
 
-        if rec:
-            records.append(rec)
+            if rec:
+                records.append(rec)
+    except PermissionError:
+        log.warning("Event %d (goes13, %d) — noaa-goes13 not publicly accessible via anonymous S3",
+                    row["event_id"], start.year)
+        return
 
     if records:
         df = pd.DataFrame(records)
