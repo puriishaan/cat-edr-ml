@@ -41,6 +41,7 @@ Outputs
   results/figures/regional_heatmaps.png
   results/cache_regional_mh.parquet
 """
+from __future__ import annotations
 import warnings; warnings.filterwarnings("ignore")
 import logging; logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger(__name__)
