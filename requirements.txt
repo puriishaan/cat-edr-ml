@@ -49,6 +49,7 @@ ipywidgets>=8.1
 tqdm>=4.66
 pyyaml>=6.0
 
-# Optional ML (CPU-only PyTorch)
-# torch  # uncomment and install separately:
-# pip install torch --index-url https://download.pytorch.org/whl/cpu
+# Deep learning (physics-informed CNN) + hyperparameter search
+# CPU build: pip install torch --index-url https://download.pytorch.org/whl/cpu
+torch>=2.2
+optuna>=3.6

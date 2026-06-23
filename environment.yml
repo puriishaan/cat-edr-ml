@@ -33,6 +33,8 @@ dependencies:
   # Utilities
   - tqdm>=4.66
   - pyyaml>=6.0
+  # Hyperparameter search
+  - optuna>=3.6
   - pip
   - pip:
     - goes2go>=2024.1

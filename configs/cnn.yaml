@@ -1,0 +1,99 @@
+# Config for the physics-informed CAT CNN (train_cnn_torch.py).
+#
+# Two parts:
+#   • fixed defaults (`model`, `loss`, `train`) — used for a plain training run.
+#   • `tune.space` — the Optuna design space; each entry is one of:
+#       {categorical: [...]}            pick from a list
+#       {float: [lo, hi], log: true}    continuous (log-uniform if log:true)
+#       {int: [lo, hi]}                 integer range
+#       <scalar>                         fixed value (not searched)
+
+seed: 42
+grid_size: 24
+primary_levels: [225, 250, 300]
+moderate_threshold: 0.20      # EDR ≥ this = "moderate-or-greater" exceedance (AUPRC target)
+test_frac: 0.2                # most-recent fraction held out (temporal generalisation)
+
+train:
+  epochs: 200
+  patience: 30                # early-stop on val log-RMSE
+  batch_size: 16
+  lr: 1.0e-3
+  weight_decay: 1.0e-4
+  optimizer: adamw            # adam | adamw
+  augment: false             # axis-flip augmentation (scalar diagnostics only)
+
+model:
+  depth: 3
+  base_width: 32
+  kernel: 3
+  norm: group
+  act: gelu
+  pool: max
+  dropout: 0.1
+  film_hidden: 32
+  film_use_climate: false
+  broadcast_climate: true
+  use_sat: true
+  sat_hidden: 16
+  fnn_depth: 2
+  fnn_width: 64
+  fnn_dropout: 0.1
+  fnn_reinject: none
+  agg: logsumexp
+  agg_tau: 8.0
+  agg_k: 8
+
+loss:
+  huber_delta: 0.1
+  w_aux: 0.2
+  w_mag: 1.0
+  lam_nonneg: 1.0
+  lam_ri: 0.1
+  lam_ti: 0.05
+  lam_tv: 0.01
+  lam_bound: 1.0
+  ri_crit: 1.0
+  gate_sharp: 2.0
+
+tune:
+  n_trials: 40
+  n_folds: 4
+  epochs: 80                  # shorter per-trial budget during search
+  space:
+    # architecture
+    depth: {categorical: [3, 4]}
+    base_width: {categorical: [16, 32, 64]}
+    kernel: {categorical: [3, 5]}
+    norm: {categorical: [group, batch, none]}
+    act: {categorical: [relu, gelu]}
+    pool: {categorical: [max, avg, stride]}
+    dropout: {float: [0.0, 0.3]}
+    # conditioning
+    film_hidden: {categorical: [0, 16, 32, 64]}
+    film_use_climate: {categorical: [true, false]}
+    broadcast_climate: {categorical: [true, false]}
+    # satellite stream
+    use_sat: {categorical: [true, false]}
+    sat_hidden: {categorical: [8, 16, 32]}
+    # FNN head
+    fnn_depth: {categorical: [0, 1, 2, 3]}
+    fnn_width: {categorical: [32, 64, 128]}
+    fnn_dropout: {float: [0.0, 0.4]}
+    fnn_reinject: {categorical: [none, film, climate]}
+    # aggregation
+    agg: {categorical: [logsumexp, topk]}
+    agg_tau: {float: [2.0, 20.0], log: true}
+    agg_k: {int: [4, 16]}
+    # optimisation
+    lr: {float: [1.0e-4, 3.0e-3], log: true}
+    weight_decay: {float: [1.0e-6, 1.0e-3], log: true}
+    batch_size: {categorical: [8, 16, 32]}
+    optimizer: {categorical: [adam, adamw]}
+    # loss weights
+    huber_delta: {float: [0.05, 0.3]}
+    w_mag: {float: [0.0, 3.0]}
+    w_aux: {float: [0.0, 0.5]}
+    lam_ri: {float: [0.0, 0.5]}
+    lam_ti: {float: [0.0, 0.3]}
+    lam_tv: {float: [0.0, 0.1]}
