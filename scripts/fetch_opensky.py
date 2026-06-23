@@ -36,8 +36,10 @@ import io
 import logging
 import random
 import tarfile
+import threading
 import time
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import pandas as pd
@@ -185,6 +187,8 @@ def main() -> None:
     ap.add_argument("--max-gb", type=float, default=18.0,
                     help="Stop once on-disk Parquet reaches this many GB (default 18)")
     ap.add_argument("--seed",   type=int, default=42, help="Shuffle seed")
+    ap.add_argument("--workers", type=int, default=6,
+                    help="Concurrent download/convert workers (default 6)")
     ap.add_argument("--no-filter", action="store_true",
                     help="Keep all rows (default: cruise-only, FL180+ airborne)")
     ap.add_argument("--out",    default=str(OUT_DIR), help=f"Output root ({OUT_DIR})")
@@ -209,20 +213,35 @@ def main() -> None:
     log.info("Work items: %d hourly files | cap: %.1f GB | cruise_only=%s | out=%s",
              len(work), args.max_gb, cruise_only, OUT_DIR)
 
-    saved = 0
-    for i, (date, hour) in enumerate(work, 1):
-        if _disk_gb() >= args.max_gb:
-            log.info("Reached %.1f GB cap — stopping.", args.max_gb)
-            break
-        if _download_hour(session, date, hour, cruise_only):
-            saved += 1
-        if i % 20 == 0:
+    counters = {"saved": 0, "done": 0}
+    lock = threading.Lock()
+    stop = threading.Event()
+
+    def _job(item: tuple[str, int]) -> None:
+        if stop.is_set():
+            return
+        date, hour = item
+        ok = _download_hour(session, date, hour, cruise_only)
+        with lock:
+            counters["done"] += 1
+            if ok:
+                counters["saved"] += 1
+            n = counters["done"]
+        if n % 20 == 0:
+            gb = _disk_gb()
             log.info("progress %d/%d  saved=%d  disk=%.2f GB",
-                     i, len(work), saved, _disk_gb())
-        time.sleep(0.2)
+                     n, len(work), counters["saved"], gb)
+            if gb >= args.max_gb:
+                log.info("Reached %.1f GB cap — stopping new downloads.", args.max_gb)
+                stop.set()
+
+    with ThreadPoolExecutor(max_workers=args.workers) as ex:
+        futures = [ex.submit(_job, it) for it in work]
+        for f in as_completed(futures):
+            f.result()
 
     log.info("Done. %d files, %.2f GB on disk under %s/",
-             saved, _disk_gb(), OUT_DIR)
+             counters["saved"], _disk_gb(), OUT_DIR)
 
 
 if __name__ == "__main__":
