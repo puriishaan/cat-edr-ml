@@ -1,0 +1,710 @@
+\documentclass[twocolumn,10pt]{article}
+
+% ---------- packages ----------
+\usepackage[margin=0.75in]{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{amsmath,amssymb}
+\usepackage{siunitx}
+\usepackage[numbers,sort&compress]{natbib}
+\usepackage{xcolor}
+\usepackage[hidelinks]{hyperref}
+\usepackage{caption}
+\usepackage{textcomp}
+\usepackage{microtype}
+
+\captionsetup{font=small,labelfont=bf}
+\graphicspath{{figures/}}
+
+% EDR units shortcut: m^{2/3} s^{-1}
+\newcommand{\edrunit}{\si{\metre\tothe{2/3}\per\second}}
+\newcommand{\todo}[1]{\textit{\textcolor{red}{[PLACEHOLDER --- #1]}}}
+
+\title{\bfseries A Physics-Informed Convolutional Neural Network for
+Predicting Clear-Air Turbulence Intensity (EDR) from ERA5 Reanalysis
+and Satellite Observations}
+
+\author{Ishaan Puri\\
+\small\texttt{cat-edr-ml} research project}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+% =====================================================================
+\begin{abstract}
+Clear-air turbulence (CAT) is a growing and notoriously hard-to-predict
+aviation hazard: it occurs without visible cloud cues, injures hundreds
+of passengers and crew annually, and is projected to intensify as the
+jet stream strengthens under climate change. Operational nowcasting
+relies on systems such as NOAA's Graphical Turbulence Guidance (GTG),
+which combine many physical turbulence diagnostics through a
+\emph{fixed weighted sum} calibrated against categorical pilot reports;
+most machine-learning alternatives, conversely, discard physics
+entirely. We present a \emph{physics-informed} convolutional neural
+network (CNN) that bridges the two. From a purpose-built catalogue of
+150 CAT events (2005--2024) we pull ERA5 reanalysis, GOES satellite
+brightness temperature, and in-situ ACARS eddy-dissipation-rate (EDR)
+measurements; we compute twelve operational CAT diagnostics
+(Richardson number, vertical wind shear, Ellrod indices,
+frontogenesis, etc.) on three jet-stream pressure levels; and we train
+an encoder--decoder CNN that emits a spatial EDR field, soft-aggregated
+to the scalar EDR the labels provide. The loss embeds physical
+constraints (non-negativity, shear--stratification gating, diagnostic
+consistency, spatial coherence, climatological bounds). We benchmark
+against a GTG-style physics surrogate and a gradient-boosted
+(XGBoost) baseline, and use an ablatable satellite stream to test
+whether cloud-top data adds skill over reanalysis alone. Six
+exploratory analyses---seasonal/diurnal decomposition, ensemble
+empirical mode decomposition (EEMD), climate-teleconnection surrogate
+testing, regional ADS-B heatmaps, satellite--EDR cross-correlation, and
+PCA---motivate every design choice. \textbf{Headline result:}
+\todo{pending end-to-end validation}.
+\end{abstract}
+
+% =====================================================================
+\section{Introduction}
+\label{sec:intro}
+
+\subsection{Why CAT matters}
+Clear-air turbulence is turbulence that occurs in the absence of
+convective clouds, typically in the strongly sheared flow near
+upper-tropospheric jet streams. Because it gives no visual or
+conventional radar warning, it is a leading cause of in-flight
+injuries. The May 2024 Singapore Airlines SQ321 event---a sudden severe
+encounter that caused a fatality and dozens of injuries---is a vivid
+reminder of the hazard. Beyond the immediate safety cost, several
+studies project that CAT frequency and intensity over busy
+mid-latitude corridors will rise through the century as lower-strato\-spheric
+warming sharpens the meridional temperature gradient and strengthens
+vertical wind shear \citep{williams2017,storer2019}.
+
+\subsection{The prediction problem}
+We target the \emph{eddy dissipation rate} (EDR), the ICAO-standard,
+aircraft-independent turbulence metric (units \edrunit). EDR is the
+rate at which turbulent kinetic energy cascades to ever-smaller eddies
+before dissipating as heat; it is estimated operationally from
+quick-access-recorder accelerations and winds \citep{sharman2014,
+kim2021}. EDR is heavy-tailed and approximately log-normal, so the
+rare, safety-critical severe tail is easily swamped in a linear loss.
+The clear-air setting compounds the difficulty: there is no cloud
+signature for an imager to key on, so prediction must come from the
+\emph{dynamical state of the atmosphere}.
+
+\subsection{What is missing}
+The dominant operational tool, NOAA GTG/GTCC, is \emph{not} a learning
+system: it computes $\sim$10 upper-level and $\sim$9 mid-level turbulence
+diagnostics per grid point and forms a fixed weighted sum,
+$\mathrm{EDR}=\sum_i w_i e_i$, with weights tuned against categorical
+PIREPs \citep{sharman2006gtg}. It ignores terrain and does not ingest
+satellite cloud-top information, which is known to carry visual
+precursors of turbulence (transverse bands, billows, comma clouds).
+Pure-ML approaches, in turn, often abandon the hard-won physics of CAT
+diagnostics altogether.
+
+\subsection{Contributions and research questions}
+We build a physics-informed CNN that keeps the GTG diagnostic ``vocabulary''
+but learns a \emph{non-linear, spatial} combination of it, trained
+directly on continuous in-situ EDR rather than categorical reports. Our
+questions are:
+\begin{itemize}
+  \item \textbf{RQ1.} Does a physics-informed CNN over reanalysis
+  diagnostics predict in-situ EDR with skill beyond (a) a GTG-style
+  physics surrogate and (b) a pure-ML XGBoost baseline?
+  \item \textbf{RQ2.} Does satellite cloud-top brightness temperature
+  add skill over reanalysis alone? We answer this structurally with an
+  ablatable satellite stream.
+  \item \textbf{Open question.} Should the model predict EDR
+  \emph{directly} or as a \emph{physics residual},
+  $\mathrm{EDR}=\text{surrogate}+\text{ML}$? We retain this as an
+  explicit A/B for future work.
+\end{itemize}
+
+% =====================================================================
+\section{Background and Related Work}
+\label{sec:background}
+
+\subsection{CAT physics and mechanisms}
+The leading CAT mechanism is Kelvin--Helmholtz (KH) instability in
+stratified shear flow. Where vertical wind shear is strong enough and
+static stability (stratification) weak enough---quantified by a low
+Richardson number---small wave-like perturbations extract energy from
+the mean flow, grow, and break down into turbulence
+\citep{williamsjoshi}. CAT is fundamentally a \emph{mesoscale}
+phenomenon: the relevant structures span $\sim$10--100\,km and observed
+CAT patches are typically less than $\sim$20\,miles across, smaller than
+the synoptic patterns often used to forecast them. Secondary sources
+include orographic lee waves (terrain-forced gravity waves) and, near
+deep convection, convectively induced turbulence (CIT).
+
+\subsection{EDR as the turbulence metric}
+EDR has replaced aircraft-specific load metrics as the WMO/ICAO turbulence
+standard because it is intrinsic to the atmosphere rather than to a
+particular airframe \citep{sharman2014}. It can be derived from vertical
+acceleration or from wind-based methods on quick-access recorder data
+\citep{kim2021}, and is commonly mapped through a log-normal transform
+\citep{sharman2017}.
+
+\subsection{Operational nowcasting: NOAA GTG/GTCC}
+GTG ingests hourly RUC/RAP model output and computes a battery of
+diagnostics at each grid point, combining them as a weighted sum whose
+weights are optimised against PIREPs \citep{sharman2006gtg}. Our
+physics surrogate (\S\ref{sec:methods}) deliberately mirrors this design
+but improves on it in three ways drawn from the literature: it optimises
+an AUC objective rather than $\psi$, it regresses continuous in-situ EDR
+instead of categorical PIREPs, and it uses a log-normal diagnostic-to-EDR
+mapping \citep{sharman2017}.
+
+\subsection{Machine learning for turbulence}
+Prior ML pipelines typically preprocess flight data, window it, and run
+parallel regression (EDR) and classification (severity) heads
+\citep{icas2020}. Recurrent models (LSTMs), reduced-order/Koopman
+methods, and counterfactual analyses have all been proposed; we
+considered these but found a spatially-aware CNN better matched to the
+mesoscale structure of CAT and to our gridded reanalysis inputs.
+
+\subsection{Satellite signatures of turbulence}
+Operational forecasters use IR/visible cloud morphology---transverse
+bands, billows, comma clouds, delta cirrus, cyclonic curvature, lee
+slopes---as turbulence precursors. This motivates a satellite stream,
+while recognising (\S\ref{sec:eda-sat}) that pure clear-air jet CAT has
+no cloud signature at all.
+
+% =====================================================================
+\section{Data}
+\label{sec:data}
+All data sources are open-access and pulled programmatically. A Google
+Cloud \texttt{e2-standard-2} VM (accessed over SSH) handled the heavier
+acquisition jobs.
+
+\subsection{Event catalogue}
+The labelled unit of analysis is an ``event.'' We scanned the MADIS/ACARS
+archive over 20 years (3-hourly sampling, FL180+) and clustered reports
+spatially (200\,km) and temporally (6\,h) into distinct events, then
+stratified by severity. The catalogue (\texttt{events.csv}) contains
+\textbf{150 events} spanning 2005-10-07 to 2024-12-30 (mean duration
+$\approx$4.6\,h), expanded from an initial hand-picked set of 10. Each
+row records the centroid, start/end time, bounding box (centroid
+$\pm 2^\circ$), report count, severity bin, and the scalar labels
+\texttt{max\_edr} and \texttt{mean\_edr}. The label distribution is:
+\texttt{max\_edr} min 0.150 / mean 0.366 / max 0.950; bins
+light~37 / moderate~76 / severe~37. \textbf{Crucially, the labels are
+scalar}---no gridded EDR exists---which drives the soft-aggregation
+design in \S\ref{sec:methods}.
+
+\subsection{ACARS / MADIS in-situ EDR (labels)}
+Ground truth comes from the NOAA MADIS public archive, providing
+per-report median (\texttt{MEDEDR}) and maximum (\texttt{MAXEDR}) EDR,
+position, altitude, time, and tail number. We retain cruise-altitude
+reports (\(\geq 5500\)\,m, FL180+) sampled 3-hourly; both turbulent and
+smooth reports are kept per event.
+
+\subsection{ERA5 reanalysis (physics fields)}
+We pull ERA5 from the analysis-ready ARCO-ERA5 Zarr store on Google
+Cloud (anonymous, no API key), at \(0.25^\circ\), hourly, averaged over a
+\(\pm 2\)\,h window around each event. Variables: $u,v$ (wind), $T$
+(temperature), $z$ (geopotential), $\omega$ (vertical velocity), $q$
+(specific humidity). Pressure levels 150--500\,hPa are requested and
+filtered to those present; the primary jet band is 225/250/300\,hPa,
+with flanking levels supporting vertical derivatives.
+
+\subsection{Satellite: GOES cloud-top brightness temperature}
+We use GOES-16/19 ABI Band~13 (\SI{10.3}{\micro\metre} IR window) from the
+NOAA AWS buckets (2017+, with legacy GOES-13 for 2010--2017). Rather than
+gridded imagery, we store \emph{scalar per-snapshot statistics} over the
+event box: \texttt{tb\_min}, \texttt{tb\_max}, \texttt{tb\_mean},
+\texttt{tb\_std}, plus provenance. \textbf{Coverage caveat central to
+RQ2:} only \textbf{64 of 150 events} have satellite data, all post-2017;
+severe pre-2017 jet CAT has no cloud signal, so the satellite stream
+must be structurally optional.
+
+\subsection{Supplementary sources}
+COSMIC-2 GNSS radio-occultation profiles (refractivity, temperature,
+pressure vs.\ geopotential height) provide extra vertical structure.
+OpenSky ADS-B state vectors (2022 sample, FL180+ cruise) supply the
+regional turbulence-proxy analysis of \S\ref{sec:eda-regional} but are
+not model inputs. The NTSB aviation query aided event discovery.
+
+\subsection{Software and reproducibility}
+Python~3.11 with \texttt{xarray}/\texttt{cfgrib}/\texttt{netCDF4},
+\texttt{pandas}/\texttt{numpy}/\texttt{pyarrow}, \texttt{metpy},
+\texttt{scipy}, \texttt{scikit-learn}, \texttt{xgboost}, \texttt{torch},
+\texttt{optuna}, \texttt{s3fs}/\texttt{satpy}/\texttt{goes2go}, and
+\texttt{matplotlib}/\texttt{cartopy}. Diagnostics are cached per event;
+all code is open-sourced.
+
+% =====================================================================
+\section{Exploratory Data Analysis}
+\label{sec:eda}
+Before building the model we examined the dataset for shared structure
+and trends. Six analyses each motivate a concrete modelling choice; we
+present each as method~$\rightarrow$~finding~$\rightarrow$~implication.
+
+\subsection{Seasonal and diurnal climatology}
+\label{sec:eda-seasonal}
+Over \textbf{116{,}245{,}659} ACARS reports (2004--2024, FL180+; anomalous
+years 2009--2011 excluded for event-window sampling bias), turbulence
+peaks in \textbf{January} (0.009\% of reports moderate) and troughs in
+\textbf{August} (0.003\%); the seasonal cycle peaks near day-of-year~252
+and troughs near DOY~353, a winter-dominant pattern set by the polar
+jet. The diurnal cycle is weak (peak 21\,UTC, amplitude only 0.052\,pp),
+implying the turbulence here is \textbf{mechanical/jet-driven, not
+convective}. Turbulence fraction rises with altitude, peaking in the
+FL180--260 band. A linear trend on clean years is slightly
+\emph{decreasing} (moderate $-0.006$\,pp/decade, $p{=}0.017$; severe
+$-0.002$\,pp/decade, $p{=}0.032$), with a fleet-composition caveat.
+
+Most importantly, a seasonal-trend decomposition partitions daily-scale
+variance as \textbf{4.8\% seasonal, 5.4\% trend, and 89.8\% residual
+(synoptic)} (Fig.~\ref{fig:decomp}). \textbf{This $\sim$90\%-synoptic
+result is the central justification for the model design}: day-to-day
+CAT is governed by individual storms and jet meanders, so ERA5 physics
+fields must do the heavy lifting and season/climate enter only as weak
+priors. Accordingly we encode date/time as cyclic
+\emph{FiLM conditioning} (\S\ref{sec:methods}), letting the network
+decide how much to use them, and keep the diurnal term minimal.
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=\textwidth]{opt2_climatology.png}
+  \caption{Seasonal and diurnal climatology of ACARS turbulence
+  (116\,M reports, FL180+). (a)~Monthly climatology with inter-annual
+  error bars; (b)~weak diurnal cycle (21\,UTC peak); (c)~turbulence by
+  altitude band (peak FL180--260); (d)~slightly decreasing annual trend
+  with anomalous years (2009--2011) excluded from the regression.}
+  \label{fig:climatology}
+\end{figure*}
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=\textwidth]{opt2_decomposition.png}
+  \caption{Seasonal decomposition of the daily turbulence rate.
+  Variance partitions as seasonal 4.8\%, trend 5.4\%, and residual
+  (synoptic weather) \textbf{89.8\%}---the result that motivates a
+  physics-field-driven model. Anomalous years are interpolated.}
+  \label{fig:decomp}
+\end{figure*}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{opt2_heatmap.png}
+  \caption{Month $\times$ hour (UTC) turbulence-frequency heatmap. The
+  seasonal axis dominates the (very weak) diurnal axis, consistent with
+  jet-stream rather than convective forcing.}
+  \label{fig:heatmap}
+\end{figure}
+
+\subsection{EEMD spectral decomposition}
+\label{sec:eda-eemd}
+We decomposed the monthly mean above-threshold EDR signal with
+\textbf{Ensemble Empirical Mode Decomposition} (EEMD; 100 trials,
+noise width 0.05). EEMD extends plain EMD by averaging sifts over
+white-noise perturbations, which suppresses the mode-mixing that
+contaminates single-trial EMD and yields physically interpretable
+timescales---this is precisely why we upgraded from EMD to EEMD. The
+intrinsic mode functions (IMFs) span sub-seasonal ($\sim$3\,mo),
+semi-annual/annual ($\sim$7\,mo), inter-annual ($\sim$1.6\,yr, the
+ENSO/QBO band), multi-year ($\sim$4\,yr), and decadal ($\sim$8\,yr)
+scales plus a slow trend (Figs.~\ref{fig:emd}--\ref{fig:eemd}).
+
+The qualitative conclusion is robust: turbulence-intensity variability
+is spread across timescales, with substantial \emph{low-frequency}
+(multi-year/decadal) energy.\footnote{The precise per-IMF variance
+partition is method-sensitive (IMFs can be mutually correlated and
+percentages need not sum to 100\%); we therefore lead with the
+decomposition-based $\sim$90\%-synoptic figure of
+\S\ref{sec:eda-seasonal} as the defensible headline and treat the IMF
+percentages as indicative.} That low-frequency energy is exactly what
+prompted us to test climate teleconnections next
+(\S\ref{sec:eda-climate}).
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=\textwidth]{emd_turbulence.png}
+  \caption{Plain (single-trial) EMD of the monthly turbulence signal,
+  shown to motivate the EEMD upgrade: adjacent IMFs exhibit mode-mixing
+  that blurs timescale interpretation.}
+  \label{fig:emd}
+\end{figure*}
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=\textwidth]{eemd_turbulence.png}
+  \caption{EEMD (100 trials) of the monthly turbulence signal. Ensemble
+  averaging cleanly separates sub-seasonal, annual, inter-annual,
+  multi-year, and decadal modes, revealing substantial low-frequency
+  energy that motivated the climate-teleconnection test of
+  Fig.~\ref{fig:climate}.}
+  \label{fig:eemd}
+\end{figure*}
+
+\subsection{Climate-index teleconnections}
+\label{sec:eda-climate}
+We matched each EEMD mode to the climate index nearest its native band
+(ONI/ENSO, Ni\~no3.4, QBO, PDO, NAO, AO, MJO) and computed lagged
+cross-correlations over $\pm 12$\,months on 170 valid months. Because
+two narrowband series correlate by chance, significance was assessed
+against \textbf{1000 Fourier phase-randomised surrogates}, and a Hilbert
+amplitude-envelope test asked whether turbulence variability strengthens
+in a given climate phase. Phase correlations are modest
+($|r|=0.14$--$0.42$) and \textbf{none are significant} ($p>0.05$) under
+surrogates; large envelope correlations (e.g.\ PDO $+0.98$) are inflated
+by autocorrelation and too few independent cycles in a 20-year record.
+
+\textbf{Conclusion:} there is no statistically robust monthly climate
+teleconnection for North American CAT. \textbf{Implication:} we include
+ONI, Ni\~no3.4, PDO, and QBO as model inputs but impose \emph{no}
+down-weighting---the network learns their (small) weight. A
+winter-stratified NAO/AO analysis is left to future work.
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=\textwidth]{climate_indices.png}
+  \caption{Lagged cross-correlations of EEMD turbulence modes against
+  climate indices (ONI, QBO, PDO, NAO). All correlations are
+  non-significant under 1000 phase-randomised surrogates ($p>0.05$).}
+  \label{fig:climate}
+\end{figure*}
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=\textwidth]{climate_amplitude.png}
+  \caption{Amplitude-modulation (Hilbert-envelope) test. Apparent
+  envelope correlations (e.g.\ PDO) are driven by autocorrelation and
+  the small number of multi-year cycles, not a real teleconnection.}
+  \label{fig:climate-amp}
+\end{figure*}
+
+\subsection{Regional spatial distribution (ADS-B)}
+\label{sec:eda-regional}
+Using OpenSky ADS-B state vectors we built a turbulence proxy---intra-hour
+standard deviation of vertical rate $>1.5$\,m\,s$^{-1}$, calibrated to
+$\mathrm{MEDEDR}\geq 0.20$ following \citet{kim2021,sharman2016}---and
+mapped month~$\times$~hour encounter rates across 15 global aviation
+regions (dateline-aware; FL180+ cruise; $\geq$5 obs/aircraft-hour;
+Fig.~\ref{fig:regional}). The clear geographic and seasonal structure of
+encounter rates supports a spatial (CNN) treatment and the box-based
+event sampling we adopt.
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=\textwidth]{regional_heatmaps.png}
+  \caption{Month $\times$ hour (UTC) turbulence-proxy heatmaps for 15
+  global aviation regions from OpenSky ADS-B (vertical-rate variance
+  proxy). Peak cells, seasonal amplitude, and sample sizes are
+  annotated per region.}
+  \label{fig:regional}
+\end{figure*}
+
+\subsection{Satellite TB $\leftrightarrow$ EDR cross-correlation}
+\label{sec:eda-sat}
+On the 64 satellite-covered events (431 lag-0 pairs), Spearman
+correlations against hourly mean EDR are: \texttt{tb\_mean}
+$r=-0.27$ ($p<0.001$), \texttt{tb\_max} $r=-0.20$ ($p<0.001$),
+\texttt{tb\_min} $r=-0.09$ (ns), \texttt{tb\_std} $\approx 0$ (ns).
+The best \emph{forward} predictor is \texttt{tb\_mean} at $+2$\,h
+($r=-0.31$): colder tops precede turbulence, suggesting a $\sim$2-hour
+lead (Figs.~\ref{fig:sat-lag}--\ref{fig:sat-ts}). Critically, the signal
+is driven by post-2017 moderate/convective events; satellite is
+\textbf{blind to severe clear-sky jet CAT}.
+
+\textbf{Implications:} the satellite enters as an \emph{optional,
+droppable} stream with an explicit present/absent mask, with suggested
+encodings \texttt{tb\_std}, $(220-\texttt{tb\_min})$, and a cooling
+$\Delta\texttt{tb}$. This analysis directly frames \textbf{RQ2}.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{opt5_lag_correlations.png}
+  \caption{Spearman correlation of satellite brightness-temperature
+  statistics with ACARS mean EDR at lags $-2$ to $+2$\,h. Positive lag =
+  satellite precedes turbulence; \texttt{tb\_mean} at $+2$\,h gives
+  $r=-0.31$.}
+  \label{fig:sat-lag}
+\end{figure}
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=\textwidth]{opt5_scatter_tb_edr.png}
+  \caption{Satellite TB vs.\ ACARS mean EDR scatter at lag 0 (top) and
+  lag $+1$\,h (bottom). Colder \texttt{tb\_mean}/\texttt{tb\_max}
+  associates with higher EDR; severe clear-sky events (no cold cloud)
+  are the off-trend outliers.}
+  \label{fig:sat-scatter}
+\end{figure*}
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=\textwidth]{opt5_timeseries_examples.png}
+  \caption{Example events: satellite IR brightness temperature (line)
+  vs.\ hourly mean EDR (bars). Cloud-top cooling tends to lead EDR peaks
+  in convective cases.}
+  \label{fig:sat-ts}
+\end{figure*}
+
+\subsection{Principal component analysis}
+\label{sec:eda-pca}
+PCA of 16 ACARS event features shows PC1 (32.8\% variance) is an
+EDR-intensity axis and PC2 (23.2\%) contrasts vertical extent with
+geographic spread; severe events separate cleanly along $+$PC1
+(Fig.~\ref{fig:pca-acars}). PCA of 29 ERA5 features yields a PC1 (41.4\%)
+that opposes vertical velocity ($\omega$) against per-level wind
+speed---a shear/stability axis---but events coloured by max EDR show
+only \emph{weak} separation (Fig.~\ref{fig:pca-era5}). This is itself a
+design argument: bulk atmospheric state is \emph{not} linearly
+separable by severity, so \textbf{spatial structure (a CNN) is needed}
+to extract skill that pooled features miss. Geographic projection of the
+scores shows mild clustering (Fig.~\ref{fig:pca-geo}).
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=\textwidth]{pca_acars.png}
+  \caption{PCA of ACARS event features (150 events, 16 features). PC1
+  (32.8\%) is an EDR-intensity axis along which severe events separate;
+  scree, PC1--PC2, PC1--PC3, and loadings shown.}
+  \label{fig:pca-acars}
+\end{figure*}
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=\textwidth]{pca_era5.png}
+  \caption{PCA of ERA5 atmospheric features. PC1 (41.4\%) opposes
+  vertical velocity against per-level wind speed (a shear/stability
+  axis), but EDR severity is only weakly separated---motivating a
+  spatial model over pooled features.}
+  \label{fig:pca-era5}
+\end{figure*}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{pca_geo.png}
+  \caption{Geographic distribution of PC1 (EDR-intensity) and PC2 scores
+  by event centroid; mild regional clustering.}
+  \label{fig:pca-geo}
+\end{figure}
+
+% =====================================================================
+\section{Methodology}
+\label{sec:methods}
+The headline model is a physics-informed CNN; a GTG-style surrogate and
+an XGBoost regressor serve as baselines. The pipeline is:
+ERA5\,+\,satellite\,+\,ACARS $\rightarrow$ diagnostics $\rightarrow$ CNN
+$\rightarrow$ EDR field $\rightarrow$ soft-aggregated scalar EDR,
+supervised on \texttt{max\_edr}. The model inherits GTG's diagnostic
+vocabulary but replaces its fixed weighted sum with a learned, spatial,
+non-linear mapping.
+
+\subsection{Physics diagnostics (inputs)}
+\label{sec:diag}
+Rather than feeding raw $u,v,T$, we compute 12 operational CAT
+diagnostics per pressure level on the native ERA5 grid, then bilinearly
+resize to $24\times24$; heavy-tailed channels (\{VWS, DEF, TI1, TI2,
+WSPD\}) are log-compressed before z-scoring, and all diagnostics are
+cached per event. Table~\ref{tab:diag} lists them. With three primary
+levels (225/250/300\,hPa) this yields
+$12\times3=\textbf{36 input channels}$.
+
+\begin{table}[t]
+\centering\small
+\caption{Physics diagnostics computed per pressure level
+(\texttt{src/features/diagnostics.py}). $\theta$ is potential
+temperature; $\zeta$ relative vorticity; $\mathbf{V}$ horizontal wind.}
+\label{tab:diag}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Diagnostic & Formula & Role \\
+\midrule
+VWS & $\sqrt{(\partial_z u)^2+(\partial_z v)^2}$ & KH energy source\\
+$N^2$ & $(g/\theta)\,\partial_z\theta$ & stratification \\
+Ri & $N^2/\mathrm{VWS}^2$ & KH instability ($<0.25$)\\
+DEF & $\sqrt{\mathrm{DST}^2+\mathrm{DSH}^2}$ & frontal tightening\\
+DIV & $\partial_x u+\partial_y v$ & convergence \\
+TI1 & $\mathrm{VWS}\cdot\mathrm{DEF}$ & Ellrod index 1\\
+TI2 & $\mathrm{VWS}(\mathrm{DEF}-\mathrm{DIV})$ & Ellrod index 2\\
+$\zeta$ & $\partial_x v-\partial_y u$ & rotation \\
+FRONTO & Petterssen frontogenesis & jet/front CAT\\
+WSPD & $\sqrt{u^2+v^2}$ & jet-core proxy\\
+$\omega$ & (raw ERA5) & GW/convective forcing\\
+VADV & $-\mathbf{V}\cdot\nabla\zeta$ & NVA predictor\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Auxiliary input streams}
+Beyond the 36 diagnostic channels: four \textbf{climate} scalars (ONI,
+Ni\~no3.4, PDO, QBO from NOAA PSL; broadcast as channels and/or via
+FiLM); four \textbf{cyclic-time} features ($\sin/\cos$ of DOY and hour,
+keeping Dec/Jan adjacent); five \textbf{satellite} features
+(\texttt{tb\_cold}, \texttt{tb\_mean}, \texttt{tb\_std},
+\texttt{tb\_max}, cooling $\Delta\texttt{tb}$) plus a present/absent
+mask; and three raw physics fields (Ri, VWS, TI1) passed un-normalised
+for the physics losses. Per-channel z-scoring is fit on the training
+split only and persisted.
+
+\subsection{CNN architecture}
+The network (\texttt{src/models/cnn\_torch.py}) is a two-stream
+encoder--decoder (U-Net-like) with \texttt{same} padding throughout
+(default depth~3: $24\!\to\!12\!\to\!6\!\to\!3$; base width 32 doubling
+per block; Conv\,$\to$\,Norm\,$\to$\,Act\,$\to$\,Dropout2d\,$\to$\,Conv\,$\to$\,Norm\,$\to$\,Act).
+\emph{FiLM conditioning} after each encoder block applies per-channel
+$\gamma\odot x+\beta$ generated from the time (and optionally climate)
+vector, identity-initialised so conditioning starts as a no-op. A small
+\emph{satellite MLP} produces an embedding fused at the bottleneck and is
+\textbf{ablatable}: when satellite is absent the input is zeros plus a
+mask, so the model learns to ignore it---this toggle is the structural
+test for RQ2. The decoder upsamples with skip concatenation; a
+$1\times1$-convolution \emph{FNN head} (a shared per-pixel MLP) maps
+decoder features to the field, and a \textbf{softplus} output enforces
+$\mathrm{EDR}\geq 0$ without saturating the heavy tail.
+
+Because labels are scalar, a differentiable \textbf{soft aggregation}
+reduces the predicted field to a scalar: log-sum-exp with searchable
+temperature $\tau$ (default 8.0), or a top-$k$ mean. The spatial mean is
+aggregated separately to an auxiliary \texttt{mean\_edr} target. The
+model has $\sim$80k parameters; a pure-NumPy CNN ($\sim$8.3k params) is
+retained as a fallback baseline.
+
+\subsection{Loss: log target plus physics penalties}
+We train on $\log\mathrm{1p}(\mathrm{EDR})$ (inverting with
+\texttt{expm1}) to stabilise the heavy tail. The base loss is a
+magnitude-weighted Huber ($\delta{=}0.1$) on
+$\log\mathrm{1p}(\hat{\mathrm{EDR}}_{\max})$ vs.\
+$\log\mathrm{1p}(\texttt{max\_edr})$, with weight $1+w_{\mathrm{mag}}y$
+emphasising the rare severe tail, plus an auxiliary Huber on the mean
+($w_{\mathrm{aux}}{=}0.2$). Five physics-penalty terms, each with a
+searched weight $\lambda_i$, shape the \emph{field}:
+\begin{enumerate}
+  \item \textbf{Non-negativity} backstop, $\mathrm{relu}(-\hat{y})^2$.
+  \item \textbf{Shear--stratification gating}: penalise high predicted
+  EDR where flow is dynamically stable (Ri\,$\gg$\,1) \emph{and}
+  low-shear---no available energy (encodes KH theory; $\mathrm{Ri}_{\rm
+  crit}{=}1$, gate sharpness 2).
+  \item \textbf{Ellrod-TI consistency}: penalise negative
+  rank-correlation between the predicted field and the TI1 field (the
+  CNN may refine but should not invert the physics).
+  \item \textbf{Total variation}: a small penalty enforcing the coherent
+  patch structure of CAT.
+  \item \textbf{Climatological bound}: penalise predictions exceeding the
+  observed maximum (0.95).
+\end{enumerate}
+
+\subsection{Baselines}
+\textbf{Physics surrogate (Model~1, GTG/GTCC-style):} log-normal-calibrate
+each diagnostic to an EDR estimate, then optimise a weight vector for
+ROC-AUC at the moderate threshold via differential evolution, comparing
+the fitted weights to GTG climatological weights as a sanity check.
+\emph{(Specified here; build is partial.)} \textbf{XGBoost (Model~2,
+pure ML):} regress $\log\mathrm{1p}(\texttt{max\_edr})$ on spatially
+pooled (mean/max/std) diagnostics plus climate, time, and satellite
+features ($\sim$121 features; 400 trees, depth~4, lr~0.03). Model~2 is
+the accuracy bar the CNN must beat---if spatial structure earns its
+keep, the CNN should outperform pooled features.
+
+\subsection{Training and model selection}
+We use a \textbf{temporal hold-out} (most-recent 20\% of events) plus
+\textbf{event-grouped, severity-stratified $k$-fold} CV so no event
+leaks across the train/validation boundary. Optimisation uses AdamW
+(lr~$10^{-3}$, weight decay~$10^{-4}$, batch~16), up to 200 epochs with
+patience~30 and gradient clipping at 5; augmentation is restricted to
+axis flips (wind vectors are not rotation-invariant). An \textbf{Optuna}
+study (TPE sampler, median pruner; 40 trials~$\times$~4-fold, 80-epoch
+budget) searches architecture (depth, width, kernel, norm, activation,
+pooling, dropout), FiLM, the satellite on/off toggle, the FNN head,
+aggregation type and $\tau$/$k$, the optimiser, and all loss
+$\lambda$'s. The search objective is
+$\text{log-RMSE}+(1-\text{AUPRC}@0.20)$, balancing regression accuracy
+and rare-event discrimination.
+
+\subsection{Open design question: direct vs.\ residual}
+The architecture supports both direct prediction (built) and a
+\emph{physics-residual} formulation
+$\mathrm{EDR}=\text{surrogate}(\text{Ellrod/GTG})+\text{ML(residual)}$.
+We retain this as an explicit planned A/B rather than baking it in:
+residual learning can ease training on small data and gives a clean
+``does ML beat physics'' narrative, while direct prediction avoids
+surrogate bias.
+
+\subsection{Metrics}
+We report RMSE and Pearson correlation on log-EDR; AUROC, AUPRC, CSI,
+and TSS for moderate exceedance ($\mathrm{EDR}\geq 0.20$); and the Brier
+score with a reliability diagram.
+
+% =====================================================================
+\section{Results}
+\label{sec:results}
+\emph{End-to-end validation is outstanding; this section is scaffolding.}
+\begin{itemize}
+  \item \textbf{Diagnostic sanity.} Low-Ri / high-TI1 / high-VWS should
+  co-locate with known severe-event positions. \todo{validation}
+  \item \textbf{Wiring check.} Overfit a handful of samples with
+  penalties off to confirm backprop. \todo{validation}
+  \item \textbf{Main comparison (Table).} Surrogate vs.\ XGBoost vs.\ CNN
+  on the temporal hold-out: RMSE, MAE, Pearson, AUROC, AUPRC@0.20,
+  CSI/TSS. \todo{validation}
+  \item \textbf{RQ2 ablation.} ERA5-only vs.\ ERA5+satellite on the
+  post-2017 subset. \todo{validation}
+  \item \textbf{Further ablations.} Direct vs.\ residual; physics
+  penalties on/off; CNN vs.\ XGBoost. \todo{validation}
+  \item \textbf{Headline figure.} Predicted-vs-observed EDR maps for test
+  events (e.g.\ SQ321), XGBoost feature importance, ROC curves.
+  \todo{validation}
+\end{itemize}
+
+% =====================================================================
+\section{Discussion}
+\label{sec:discussion}
+\todo{quantitative discussion pending validation.} The intended
+discussion compares our skill to operational benchmarks (GTG, ECMWF
+IFS-CAT correlations) and interprets the satellite ablation against the
+coverage caveat of \S\ref{sec:eda-sat}.
+
+\paragraph{Honest limitations.}
+(i)~ERA5's \(0.25^\circ\) resolution is coarse relative to the
+$<$20-mile CAT patch scale. (ii)~Labels are \emph{scalar only}: the
+predicted field's shape is physics-constrained, not label-supervised,
+until gridded EDR exists. (iii)~Ground truth is sparse (150 events;
+satellite on only 64). (iv)~Convective-vs-true-CAT ambiguity persists in
+the post-2017 satellite subset. (v)~The pre-2017 satellite gap coincides
+with the most severe events. (vi)~The decreasing-trend result may carry
+instrumental (fleet-drift) signal. (vii)~The EEMD per-IMF variance
+partition is method-sensitive and should not be over-interpreted.
+
+% =====================================================================
+\section{Conclusion and Future Work}
+\label{sec:conclusion}
+We have assembled an open, 150-event, multi-source CAT dataset and built
+a physics-informed CNN that predicts EDR while respecting CAT physics
+through both its inputs (operational diagnostics) and its loss (KH
+gating, diagnostic consistency, spatial coherence, climatological
+bounds), with a GTG-style surrogate and XGBoost as baselines and an
+ablatable satellite stream to answer whether imagery adds skill.
+Validation (RQ1/RQ2) is the immediate next step. Future work includes
+the direct-vs-residual A/B; promoting the heatmap to dense supervision
+via sparse-to-dense ACARS-track labels (changing only the loss);
+Himawari coverage for global regions; COSMIC-2 vertical structure;
+a winter-stratified NAO/AO teleconnection test; and a real-life test
+that simulates a weather phenomenon and predicts CAT hotspots.
+
+% =====================================================================
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\appendix
+\section{Diagnostic equations (GTG cross-reference)}
+The diagnostics of Table~\ref{tab:diag} map to standard GTG equation
+labels: Ri (A1), structure-function EDR (A7) and SIGW (A8),
+frontogenesis (A9/A10), TI1 (A15), horizontal temperature gradient
+(A23), wind speed (A24), $|\mathbf{V}|\cdot$DEF (A28), unbalanced-flow
+diagnostic (A30), ABSIA (A34), NCSU1 (A36), Colson--Panofsky (A4), and
+DTF3 (A6). \todo{full derivations}
+
+\section{Hyperparameters and search space}
+The complete fixed configuration and Optuna search space are in
+\texttt{configs/cnn.yaml}. \todo{table dump}
+
+\section{Figure index}
+Every figure here is reproduced by the \texttt{analysis\_*.py} scripts
+and stored in \texttt{results/figures/}; see this paper's
+\texttt{figures/} directory for the copies embedded above.
+
+\end{document}
