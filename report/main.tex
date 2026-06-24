@@ -102,7 +102,7 @@ sketches the end-to-end system this paper builds.
 
 \begin{figure}[H]
   \centering
-  \includegraphics[width=\columnwidth]{pipeline_overview.png}
+  \includegraphics[width=0.80\linewidth]{pipeline_overview.png}
   \caption{System overview. ERA5 reanalysis and (optional) GOES
   satellite brightness temperature are turned into physics diagnostics,
   fed to a physics-informed encoder--decoder CNN that emits an EDR field,
@@ -156,7 +156,7 @@ induced turbulence (CIT).
 
 \begin{figure}[H]
   \centering
-  \includegraphics[width=\columnwidth]{kh_mechanism.png}
+  \includegraphics[width=0.80\linewidth]{kh_mechanism.png}
   \caption{Clear-air turbulence mechanism. At a jet-stream interface,
   strong vertical wind shear over weak stratification drives the
   Richardson number below the critical value ($\approx$0.25); wave-like
@@ -230,7 +230,7 @@ Fig.~\ref{fig:dataset}.
 
 \begin{figure}[H]
   \centering
-  \includegraphics[width=\columnwidth]{dataset_overview.png}
+  \includegraphics[width=0.85\linewidth]{dataset_overview.png}
   \caption{Dataset overview. (a)~Geographic distribution of the 150 CAT
   events; colour is the per-event maximum EDR and marker size scales with
   the number of ACARS reports, showing the North-American/North-Atlantic
@@ -357,7 +357,7 @@ decomposition.
 
 \begin{figure}[H]
   \centering
-  \includegraphics[width=\columnwidth]{opt2_climatology.png}
+  \includegraphics[width=0.88\linewidth]{opt2_climatology.png}
   \caption{Seasonal and diurnal climatology of ACARS turbulence
   (116\,M reports, FL180+). (a)~Monthly climatology with inter-annual
   error bars (January peak); (b)~weak diurnal cycle (21\,UTC peak,
@@ -369,7 +369,7 @@ decomposition.
 
 \begin{figure}[H]
   \centering
-  \includegraphics[width=\columnwidth]{opt2_decomposition.png}
+  \includegraphics[width=0.88\linewidth]{opt2_decomposition.png}
   \caption{Seasonal decomposition of the daily turbulence rate
   (observed, seasonal, 365-day Savitzky--Golay trend, residual).
   Variance partitions as seasonal 4.8\%, trend 5.4\%, and residual
@@ -380,7 +380,7 @@ decomposition.
 
 \begin{figure}[H]
   \centering
-  \includegraphics[width=\columnwidth]{opt2_heatmap.png}
+  \includegraphics[width=0.88\linewidth]{opt2_heatmap.png}
   \caption{Month $\times$ hour (UTC) turbulence-frequency heatmap. The
   seasonal axis dominates the (very weak) diurnal axis, consistent with
   jet-stream rather than convective forcing.}
@@ -417,7 +417,7 @@ as indicative and lead with the robust 89.8\% synoptic figure of
 
 \begin{figure}[H]
   \centering
-  \includegraphics[width=\columnwidth]{emd_turbulence.png}
+  \includegraphics[width=0.88\linewidth]{emd_turbulence.png}
   \caption{EMD of the monthly turbulence \emph{rate}. Sub-seasonal IMF1
   ($\sim$4\,mo, 37.5\%) and IMF2 ($\sim$9\,mo, 33.9\%) dominate; no clean
   annual mode appears, confirming that synoptic weather---not the
@@ -427,7 +427,7 @@ as indicative and lead with the robust 89.8\% synoptic figure of
 
 \begin{figure}[H]
   \centering
-  \includegraphics[width=\columnwidth]{eemd_turbulence.png}
+  \includegraphics[width=0.88\linewidth]{eemd_turbulence.png}
   \caption{EEMD (100 trials) of the monthly turbulence \emph{intensity}.
   Ensemble averaging cleanly separates sub-seasonal through decadal modes
   and exposes prominent multi-year ($\sim$4\,yr) and decadal
@@ -460,7 +460,7 @@ winter-stratified NAO/AO analysis is left to future work.
 
 \begin{figure}[H]
   \centering
-  \includegraphics[width=\columnwidth]{climate_indices.png}
+  \includegraphics[width=0.88\linewidth]{climate_indices.png}
   \caption{Lagged cross-correlations of EEMD turbulence modes against
   climate indices (ONI, QBO, PDO, NAO). All correlations are
   non-significant under 1000 phase-randomised surrogates ($p>0.05$).}
@@ -469,7 +469,7 @@ winter-stratified NAO/AO analysis is left to future work.
 
 \begin{figure}[H]
   \centering
-  \includegraphics[width=\columnwidth]{climate_amplitude.png}
+  \includegraphics[width=0.88\linewidth]{climate_amplitude.png}
   \caption{Amplitude-modulation (Hilbert-envelope) test. Apparent
   envelope correlations (e.g.\ PDO, $r=+0.98$) are driven by
   autocorrelation and the small number of multi-year cycles
@@ -490,7 +490,7 @@ event sampling we adopt.
 
 \begin{figure}[H]
   \centering
-  \includegraphics[width=\columnwidth]{regional_heatmaps.png}
+  \includegraphics[width=0.88\linewidth]{regional_heatmaps.png}
   \caption{Month $\times$ hour (UTC) turbulence-proxy heatmaps for 15
   global aviation regions from OpenSky ADS-B (vertical-rate variance
   proxy, std$(w)>1.5$\,m\,s$^{-1}$). Peak cells ($\star$), seasonal
@@ -518,7 +518,7 @@ directly frames \textbf{RQ2}.
 
 \begin{figure}[H]
   \centering
-  \includegraphics[width=\columnwidth]{opt5_lag_correlations.png}
+  \includegraphics[width=0.88\linewidth]{opt5_lag_correlations.png}
   \caption{Spearman correlation of satellite brightness-temperature
   statistics with ACARS mean EDR at lags $-2$ to $+2$\,h. Positive lag =
   satellite precedes turbulence; mean TB at $+2$\,h gives $r=-0.31$.}
@@ -527,7 +527,7 @@ directly frames \textbf{RQ2}.
 
 \begin{figure}[H]
   \centering
-  \includegraphics[width=\columnwidth]{opt5_scatter_tb_edr.png}
+  \includegraphics[width=0.88\linewidth]{opt5_scatter_tb_edr.png}
   \caption{Satellite TB vs.\ ACARS mean EDR scatter at lag 0 (top) and
   lag $+1$\,h (bottom). Colder mean/maximum TB associates with higher
   EDR; severe clear-sky events (no cold cloud) are the off-trend
@@ -537,7 +537,7 @@ directly frames \textbf{RQ2}.
 
 \begin{figure}[H]
   \centering
-  \includegraphics[width=\columnwidth]{opt5_timeseries_examples.png}
+  \includegraphics[width=0.88\linewidth]{opt5_timeseries_examples.png}
   \caption{Example events: satellite IR brightness temperature (line)
   vs.\ hourly mean EDR (bars). Cloud-top cooling tends to lead EDR peaks
   in convective cases.}
@@ -563,7 +563,7 @@ latitudes (Fig.~\ref{fig:pca-geo}).
 
 \begin{figure}[H]
   \centering
-  \includegraphics[width=\columnwidth]{pca_acars.png}
+  \includegraphics[width=0.88\linewidth]{pca_acars.png}
   \caption{PCA of ACARS event features (150 events, 16 features). PC1
   (32.8\%) is an EDR-intensity axis along which severe events separate;
   scree, PC1--PC2, PC1--PC3, and feature loadings shown.}
@@ -572,7 +572,7 @@ latitudes (Fig.~\ref{fig:pca-geo}).
 
 \begin{figure}[H]
   \centering
-  \includegraphics[width=\columnwidth]{pca_era5.png}
+  \includegraphics[width=0.88\linewidth]{pca_era5.png}
   \caption{PCA of ERA5 atmospheric features (29 features). PC1 (41.4\%)
   opposes vertical velocity against per-level wind speed (a
   shear/stability axis), but EDR severity is only weakly
@@ -582,7 +582,7 @@ latitudes (Fig.~\ref{fig:pca-geo}).
 
 \begin{figure}[H]
   \centering
-  \includegraphics[width=\columnwidth]{pca_geo.png}
+  \includegraphics[width=0.88\linewidth]{pca_geo.png}
   \caption{Geographic distribution of PC1 (EDR-intensity) and PC2 scores
   by event centroid; most intense events cluster at higher latitudes.}
   \label{fig:pca-geo}
@@ -799,7 +799,7 @@ Light      &  37 & 0.102 & 0.072 & $-0.107$ \\
 
 \begin{figure}[H]
   \centering
-  \includegraphics[width=\columnwidth]{cnn_pred_vs_obs.png}
+  \includegraphics[width=0.88\linewidth]{cnn_pred_vs_obs.png}
   \caption{Preliminary CNN predictions. (a)~Predicted vs.\ observed max
   EDR (train blue, validation red, 1:1 dashed); overall $r=0.885$.
   (b)~RMSE by severity bin---error concentrates in the rare severe
