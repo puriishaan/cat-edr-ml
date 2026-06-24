@@ -21,18 +21,28 @@ Output: `main.pdf`.
 
 ## Status notes
 - **Sections 1–5** (Intro → Methodology) are written in full prose.
-- **Section 6 (Results)** is intentionally scaffolding: the model is
-  built but **not yet validated**, so it carries red `[PLACEHOLDER]`
-  markers. Fill these once validation metrics exist.
-- The physics **surrogate** and **residual-hybrid** are marked as
-  specified/planned; the **CNN** and **XGBoost** baselines are built.
+- **§6.1 has REAL preliminary results**: the pure-NumPy baseline CNN
+  (`models/cat_cnn_eval.csv`) — overall Pearson 0.885 / RMSE 0.120,
+  with a generated predicted-vs-observed figure (`cnn_pred_vs_obs.png`,
+  built from the eval CSV). This is a simple 80/20 split, NOT the
+  rigorous grouped-CV protocol, and is labelled as such.
+- **§6.2–6.5 remain scaffolding**: the physics-informed CNN, GTG
+  surrogate, and XGBoost have not been run under the rigorous protocol
+  yet — red `[PENDING]` markers. Fill once validation metrics exist.
+- §5.6 now has a full **XGBoost-comparison** subsection (why CNN-vs-XGB
+  isolates the value of spatial structure).
 
-## Known items to reconcile (flagged in-text)
-1. Title/framing centers the built CNN (the older draft said
-   "physics-residual hybrid"; residual is now future work).
+## 15 figures embedded
+14 analysis PNGs from `results/figures/` + `cnn_pred_vs_obs.png`
+(generated here from the baseline eval CSV).
+
+## Reconciliations handled in-text
+1. Title centers the built CNN (older draft said "physics-residual
+   hybrid"; residual is now an explicit future-work A/B).
 2. CNN uses **36** input channels (12 diagnostics × 3 levels), not the
-   ~21 raw-field list from the early brainstorm.
-3. The EEMD per-IMF variance percentages are method-sensitive; the
-   paper leads with the **~90%-synoptic** figure from the seasonal
-   decomposition instead. The embedded EEMD figure shows its own
-   annotations — keep captions qualitative.
+   ~21 raw-field list from the early brainstorm. The NumPy *reference*
+   uses 18 raw channels (documented separately).
+3. **EMD/EEMD reconciled**: not a conflict — two different signals.
+   EMD on occurrence rate `frac_m` (IMF1≈37.5%) vs. EEMD on intensity
+   `edr_mean_above` (IMF1≈5.1%). Both shown; paper leads with the
+   robust ~90%-synoptic figure from the seasonal decomposition.
