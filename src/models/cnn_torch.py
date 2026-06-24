@@ -1,247 +1,225 @@
 """
-Physics-informed CAT CNN (PyTorch).
+CatCNNTorch — PyTorch U-Net with FiLM conditioning for CAT turbulence.
 
-Two-stream encoder–decoder that emits a dense EDR heatmap Ŷ(x,y) ≥ 0 and soft-aggregates
-it to the scalar max_EDR the labels actually provide:
+Input streams:
+  diag    : (B, C_diag, H, W)  physics diagnostic channels
+  climate : (B, 4)              climate indices
+  time    : (B, 4)              cyclic time features
+  sat     : (B, 5)              satellite TB stats
+  sat_mask: (B, 1)              satellite availability
 
-    diag (+ broadcast climate) ─► U-Net encoder ──┐
-                                                   ├─ bottleneck ─► U-Net decoder ─► 1×1 FNN head
-    satellite scalars ─► MLP ──► broadcast ────────┘                                   │ softplus
-                                                                                        ▼
-                                                              Ŷ(x,y) ≥ 0  ──soft-pool──► max_EDR̂
-
-Design choices (all the knobs Optuna searches live in `cfg`):
-  • `same` padding everywhere so encoder/decoder/skip sizes line up (odd dims handled by
-    interpolating the decoder up to each skip's exact size).
-  • FiLM(γ,β) after every encoder block, generated from cyclic-time (+ optionally climate).
-  • softplus output → EDR ≥ 0 as a hard physical bound, no tail saturation (vs sigmoid).
-  • soft aggregation (softmax-weighted mean ≈ max, or top-k mean) bridges the dense field to
-    the scalar label; temperature τ is searchable (τ→∞ ⇒ true max, τ→0 ⇒ mean).
-  • satellite branch is fully optional: a present/absent mask lets the net ignore it, and
-    cfg['use_sat']=False removes it entirely (the satellite-skill ablation).
-  • NO residual: the field is predicted directly (direct-vs-residual is an open A/B).
+Output:
+  field   : (B, 1, H, W)  spatial turbulence intensity map
+  max_hat : (B,)            event max intensity (aggregated)
+  mean_hat: (B,)            event mean intensity (aggregated)
 """
-
-from __future__ import annotations
-
-import math
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# ─── Default config (Optuna overrides any subset) ─────────────────────────────
 DEFAULT_CFG = dict(
-    depth=3,                 # encoder blocks (24→12→6→3 at depth 3)
-    base_width=32,           # channels in first block; doubles each block
-    kernel=3,                # conv kernel (3 or 5)
-    norm="group",            # group | batch | none
-    act="gelu",              # relu | gelu
-    pool="max",              # max | avg | stride
-    dropout=0.1,             # spatial dropout in conv blocks
-    # conditioning
-    film_hidden=32,          # FiLM generator hidden units (0 ⇒ no FiLM)
-    film_use_climate=False,  # also feed climate into FiLM
-    broadcast_climate=True,  # tile climate as extra input channels
-    # satellite stream
-    use_sat=True,
-    sat_hidden=16,
-    # FNN head (1×1 convs == per-pixel MLP)
-    fnn_depth=2,             # hidden layers (0 ⇒ linear readout)
-    fnn_width=64,
-    fnn_dropout=0.1,
-    fnn_reinject="none",     # none | film | climate  (re-add conditioning at the head)
-    # aggregation heatmap→scalar
-    agg="logsumexp",         # logsumexp (softmax-weighted mean) | topk
-    agg_tau=8.0,             # softmax temperature
-    agg_k=8,                 # top-k pixels for topk mean
+    grid_size       = 24,
+    depth           = 3,         # encoder stages
+    base_filters    = 32,
+    kernel_size     = 3,
+    dropout         = 0.1,
+    norm            = "batch",   # batch / group / none
+    pool            = "max",     # max / avg / stride
+    act             = "gelu",    # relu / gelu / silu
+    film            = True,
+    sat_fusion      = True,
+    aggregation     = "logsumexp",  # logsumexp / topk
+    topk            = 4,
 )
 
 
 def _act(name: str) -> nn.Module:
-    return {"relu": nn.ReLU(inplace=True), "gelu": nn.GELU()}[name]
+    return {"relu": nn.ReLU(), "gelu": nn.GELU(), "silu": nn.SiLU()}[name]
 
 
-def _norm(name: str, ch: int) -> nn.Module:
+def _norm(name: str, channels: int) -> nn.Module:
     if name == "batch":
-        return nn.BatchNorm2d(ch)
+        return nn.BatchNorm2d(channels)
     if name == "group":
-        groups = math.gcd(ch, 8) or 1
-        return nn.GroupNorm(max(1, groups), ch)
+        g = min(8, channels)
+        while channels % g != 0 and g > 1:
+            g -= 1
+        return nn.GroupNorm(g, channels)
     return nn.Identity()
 
 
 class ConvBlock(nn.Module):
-    """[Conv→Norm→Act→Dropout]×2 with `same` padding."""
-
-    def __init__(self, cin, cout, k, norm, act, dropout):
+    def __init__(self, in_ch, out_ch, k=3, norm_type="batch", act_type="gelu", drop=0.0):
         super().__init__()
-        pad = (k - 1) // 2
-        self.net = nn.Sequential(
-            nn.Conv2d(cin, cout, k, padding=pad),
-            _norm(norm, cout), _act(act), nn.Dropout2d(dropout),
-            nn.Conv2d(cout, cout, k, padding=pad),
-            _norm(norm, cout), _act(act),
+        pad = k // 2
+        self.block = nn.Sequential(
+            nn.Conv2d(in_ch, out_ch, k, padding=pad, bias=False),
+            _norm(norm_type, out_ch),
+            _act(act_type),
+            nn.Dropout2d(drop) if drop > 0 else nn.Identity(),
+            nn.Conv2d(out_ch, out_ch, k, padding=pad, bias=False),
+            _norm(norm_type, out_ch),
+            _act(act_type),
         )
+        self.skip = nn.Conv2d(in_ch, out_ch, 1) if in_ch != out_ch else nn.Identity()
 
     def forward(self, x):
-        return self.net(x)
+        return self.block(x) + self.skip(x)
 
 
 class FiLM(nn.Module):
-    """Per-channel feature-wise linear modulation: γ⊙x + β from a conditioning vector."""
+    """Feature-wise Linear Modulation: scale/shift from conditioning vector."""
 
-    def __init__(self, cond_dim, ch, hidden):
+    def __init__(self, cond_dim: int, n_channels: int):
         super().__init__()
-        self.gen = nn.Sequential(
-            nn.Linear(cond_dim, hidden), nn.GELU(), nn.Linear(hidden, 2 * ch)
-        )
-        self.ch = ch
-        nn.init.zeros_(self.gen[-1].weight)      # start as identity (γ=1, β=0)
-        nn.init.zeros_(self.gen[-1].bias)
+        self.gen = nn.Linear(cond_dim, 2 * n_channels)
+        nn.init.zeros_(self.gen.weight)
+        nn.init.zeros_(self.gen.bias)
 
-    def forward(self, x, cond):
-        gb = self.gen(cond)
-        gamma, beta = gb[:, : self.ch], gb[:, self.ch :]
-        return (1.0 + gamma)[:, :, None, None] * x + beta[:, :, None, None]
+    def forward(self, x: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
+        # x: (B, C, H, W)  cond: (B, cond_dim)
+        params = self.gen(cond)                         # (B, 2C)
+        gamma, beta = params.chunk(2, dim=1)
+        gamma = gamma[:, :, None, None] + 1.0           # identity init
+        beta  = beta[:, :, None, None]
+        return x * gamma + beta
 
 
-def _downsample(mode, ch):
-    if mode == "stride":
-        return nn.Conv2d(ch, ch, 2, stride=2)
-    if mode == "avg":
-        return nn.AvgPool2d(2, ceil_mode=True)
-    return nn.MaxPool2d(2, ceil_mode=True)
+def _downsample(channels: int, pool_type: str) -> nn.Module:
+    if pool_type == "max":
+        return nn.MaxPool2d(2)
+    if pool_type == "avg":
+        return nn.AvgPool2d(2)
+    return nn.Conv2d(channels, channels, 2, stride=2)   # stride conv
 
 
 class CatCNNTorch(nn.Module):
-    def __init__(self, in_channels, climate_dim, time_dim, sat_dim, cfg=None):
+    def __init__(
+        self,
+        in_channels: int,
+        climate_dim: int = 4,
+        time_dim: int = 4,
+        sat_dim: int = 5,
+        cfg: dict = None,
+    ):
         super().__init__()
-        self.cfg = {**DEFAULT_CFG, **(cfg or {})}
-        c = self.cfg
-        self.climate_dim = climate_dim
-        self.time_dim = time_dim
+        c = {**DEFAULT_CFG, **(cfg or {})}
+        self.cfg = c
 
-        # conditioning dim for FiLM
-        self.cond_dim = time_dim + (climate_dim if c["film_use_climate"] else 0)
-        self.use_film = c["film_hidden"] > 0 and self.cond_dim > 0
+        cond_dim  = climate_dim + time_dim
+        sat_out   = 16 if c["sat_fusion"] else 0
+        enc_chs   = [c["base_filters"] * (2 ** i) for i in range(c["depth"])]
 
-        enc_in = in_channels + (climate_dim if c["broadcast_climate"] else 0)
-        widths = [c["base_width"] * (2 ** i) for i in range(c["depth"])]
-
-        # ── encoder ──────────────────────────────────────────────────────────
+        # Encoder
         self.enc_blocks = nn.ModuleList()
-        self.enc_films = nn.ModuleList()
-        self.downs = nn.ModuleList()
-        prev = enc_in
-        for w in widths:
-            self.enc_blocks.append(ConvBlock(prev, w, c["kernel"], c["norm"], c["act"], c["dropout"]))
-            self.enc_films.append(
-                FiLM(self.cond_dim, w, c["film_hidden"]) if self.use_film else None
+        self.enc_films  = nn.ModuleList()
+        self.pools      = nn.ModuleList()
+        in_ch = in_channels
+        for out_ch in enc_chs:
+            self.enc_blocks.append(
+                ConvBlock(in_ch, out_ch, c["kernel_size"],
+                          c["norm"], c["act"], c["dropout"])
             )
-            self.downs.append(_downsample(c["pool"], w))
-            prev = w
+            self.enc_films.append(FiLM(cond_dim, out_ch) if c["film"] else nn.Identity())
+            self.pools.append(_downsample(out_ch, c["pool"]))
+            in_ch = out_ch
 
-        # ── satellite stream ─────────────────────────────────────────────────
-        self.sat_emb_dim = 0
-        if c["use_sat"]:
-            self.sat_emb_dim = c["sat_hidden"]
+        # Bottleneck
+        bot_ch = enc_chs[-1] * 2
+        self.bottleneck = ConvBlock(in_ch, bot_ch, c["kernel_size"],
+                                     c["norm"], c["act"], c["dropout"])
+        self.bot_film = FiLM(cond_dim, bot_ch) if c["film"] else nn.Identity()
+
+        # Satellite MLP fused at bottleneck
+        if c["sat_fusion"]:
             self.sat_mlp = nn.Sequential(
-                nn.Linear(sat_dim + 1, c["sat_hidden"]), nn.GELU(),
-                nn.Linear(c["sat_hidden"], c["sat_hidden"]), nn.GELU(),
+                nn.Linear(sat_dim + 1, 32), nn.GELU(),
+                nn.Linear(32, sat_out),
             )
+            bot_ch_with_sat = bot_ch + sat_out
+        else:
+            self.sat_mlp = None
+            bot_ch_with_sat = bot_ch
 
-        # ── bottleneck (fuses satellite embedding) ───────────────────────────
-        bott_in = widths[-1] + self.sat_emb_dim
-        self.bottleneck = ConvBlock(bott_in, widths[-1], c["kernel"], c["norm"], c["act"], c["dropout"])
-
-        # ── decoder (upsample + skip concat) ─────────────────────────────────
+        # Decoder
+        self.dec_ups    = nn.ModuleList()
         self.dec_blocks = nn.ModuleList()
-        for i in reversed(range(c["depth"])):
-            skip_ch = widths[i]
-            up_ch = widths[i + 1] if i + 1 < c["depth"] else widths[-1]
-            self.dec_blocks.append(
-                ConvBlock(up_ch + skip_ch, skip_ch, c["kernel"], c["norm"], c["act"], c["dropout"])
+        dec_in = bot_ch_with_sat
+        for skip_ch in reversed(enc_chs):
+            out_ch = skip_ch
+            self.dec_ups.append(
+                nn.Sequential(nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False),
+                               nn.Conv2d(dec_in, out_ch, 1))
             )
+            self.dec_blocks.append(
+                ConvBlock(out_ch + skip_ch, out_ch, c["kernel_size"],
+                          c["norm"], c["act"], c["dropout"])
+            )
+            dec_in = out_ch
 
-        # ── FNN head (1×1 convs == shared per-pixel MLP) ─────────────────────
-        head_in = widths[0]
-        self.reinject_dim = 0
-        if c["fnn_reinject"] == "film":
-            self.reinject_dim = self.cond_dim
-        elif c["fnn_reinject"] == "climate":
-            self.reinject_dim = climate_dim
-        head_in += self.reinject_dim
+        # Head: 1×1 conv → softplus
+        self.head = nn.Sequential(
+            nn.Conv2d(dec_in, 1, 1),
+            nn.Softplus(),
+        )
 
-        layers = []
-        prev = head_in
-        for _ in range(c["fnn_depth"]):
-            layers += [nn.Conv2d(prev, c["fnn_width"], 1), _act(c["act"]), nn.Dropout2d(c["fnn_dropout"])]
-            prev = c["fnn_width"]
-        layers += [nn.Conv2d(prev, 1, 1)]
-        self.head = nn.Sequential(*layers)
+    def aggregate(self, field: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """(B,1,H,W) → (max_hat (B,), mean_hat (B,))"""
+        flat = field.view(field.size(0), -1)   # (B, H*W)
+        if self.cfg["aggregation"] == "logsumexp":
+            # log-mean-exp: logsumexp - log(N) ≈ max for sparse fields, mean for flat fields
+            max_hat = torch.logsumexp(flat, dim=1) - torch.log(torch.tensor(float(flat.size(1))))
+        else:
+            k = min(self.cfg["topk"], flat.size(1))
+            max_hat = flat.topk(k, dim=1).values.mean(1)
+        mean_hat = flat.mean(1)
+        return max_hat, mean_hat
 
-    # ── helpers ──────────────────────────────────────────────────────────────
-    def _cond(self, time, climate):
-        if not self.use_film:
-            return None
-        return torch.cat([time, climate], 1) if self.cfg["film_use_climate"] else time
+    def forward(self, batch: dict) -> dict:
+        x        = batch["diag"]        # (B, C, H, W)
+        climate  = batch["climate"]     # (B, 4)
+        time_f   = batch["time"]        # (B, 4)
+        sat      = batch["sat"]         # (B, 5)
+        sat_mask = batch["sat_mask"]    # (B, 1)
 
-    def aggregate(self, field):
-        """Heatmap (N,1,H,W) ≥0 → scalar (N,1) predicted max_EDR."""
-        N = field.shape[0]
-        flat = field.view(N, -1)
-        if self.cfg["agg"] == "topk":
-            k = min(self.cfg["agg_k"], flat.shape[1])
-            return flat.topk(k, dim=1).values.mean(1, keepdim=True)
-        # softmax-weighted mean: τ→∞ ⇒ max, τ→0 ⇒ mean; bounded, stable
-        tau = self.cfg["agg_tau"]
-        w = torch.softmax(tau * flat, dim=1)
-        return (w * flat).sum(1, keepdim=True)
+        cond = torch.cat([climate, time_f], dim=1)   # (B, cond_dim)
 
-    # ── forward ──────────────────────────────────────────────────────────────
-    def forward(self, batch):
-        x = batch["diag"]
-        climate, time, sat, sat_mask = batch["climate"], batch["time"], batch["sat"], batch["sat_mask"]
-        N, _, H, W = x.shape
-        cond = self._cond(time, climate)
+        # Encoder
+        skips = []
+        for block, film, pool in zip(self.enc_blocks, self.enc_films, self.pools):
+            x = block(x)
+            x = film(x, cond) if self.cfg["film"] else x
+            skips.append(x)
+            x = pool(x)
 
-        if self.cfg["broadcast_climate"]:
-            x = torch.cat([x, climate[:, :, None, None].expand(N, self.climate_dim, H, W)], 1)
+        # Bottleneck
+        x = self.bottleneck(x)
+        x = self.bot_film(x, cond) if self.cfg["film"] else x
 
-        # encoder
-        skips, sizes = [], []
-        h = x
-        for block, film, down in zip(self.enc_blocks, self.enc_films, self.downs):
-            h = block(h)
-            if film is not None:
-                h = film(h, cond)
-            skips.append(h)
-            sizes.append(h.shape[-2:])
-            h = down(h)
+        # Satellite fusion at bottleneck
+        if self.sat_mlp is not None:
+            sat_in  = torch.cat([sat, sat_mask], dim=1)   # (B, 6)
+            sat_vec = self.sat_mlp(sat_in)                 # (B, sat_out)
+            H, W    = x.shape[2], x.shape[3]
+            sat_map = sat_vec[:, :, None, None].expand(-1, -1, H, W)
+            x = torch.cat([x, sat_map], dim=1)
 
-        # satellite fusion at bottleneck
-        if self.sat_emb_dim:
-            emb = self.sat_mlp(torch.cat([sat, sat_mask], 1))      # (N, sat_hidden)
-            emb = emb[:, :, None, None].expand(-1, -1, h.shape[-2], h.shape[-1])
-            h = torch.cat([h, emb], 1)
-        h = self.bottleneck(h)
+        # Decoder
+        for up, block, skip in zip(self.dec_ups, self.dec_blocks, reversed(skips)):
+            x = up(x)
+            # handle size mismatch
+            if x.shape[-2:] != skip.shape[-2:]:
+                x = F.interpolate(x, size=skip.shape[-2:], mode="bilinear", align_corners=False)
+            x = torch.cat([x, skip], dim=1)
+            x = block(x)
 
-        # decoder
-        for dec, skip, size in zip(self.dec_blocks, reversed(skips), reversed(sizes)):
-            h = F.interpolate(h, size=size, mode="bilinear", align_corners=False)
-            h = dec(torch.cat([h, skip], 1))
+        field    = self.head(x)                    # (B, 1, H, W)
+        max_hat, mean_hat = self.aggregate(field)
 
-        # head (optional conditioning re-injection)
-        if self.reinject_dim:
-            rc = cond if self.cfg["fnn_reinject"] == "film" else climate
-            h = torch.cat([h, rc[:, :, None, None].expand(-1, self.reinject_dim, H, W)], 1)
-
-        field = F.softplus(self.head(h))            # (N,1,H,W) ≥ 0  — the heatmap
-        max_hat = self.aggregate(field)             # (N,1) predicted max_edr
-        mean_hat = field.mean(dim=(2, 3))           # (N,1) predicted mean_edr (aux)
         return {"field": field, "max_hat": max_hat, "mean_hat": mean_hat}
 
 
-def build_model(cfg, in_channels, climate_dim, time_dim, sat_dim) -> CatCNNTorch:
+def build_model(cfg: dict, in_channels: int, climate_dim: int = 4,
+                time_dim: int = 4, sat_dim: int = 5) -> CatCNNTorch:
     return CatCNNTorch(in_channels, climate_dim, time_dim, sat_dim, cfg)

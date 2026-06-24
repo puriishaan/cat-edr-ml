@@ -1,113 +1,128 @@
 """
-XGBoost accuracy baseline — the number the CNN must beat.
+XGBoost baseline for CAT turbulence intensity prediction.
 
-This is a *standalone* gradient-boosted-trees regressor on spatially-pooled physics
-diagnostics (+ climate + cyclic time + satellite stats), predicting log1p(max_edr).
-It is NOT a residual corrector and NOT an ensemble partner: its only job is to tell us
-whether the CNN's spatial structure adds skill over per-pixel/pooled physics features.
-If the CNN can't beat this, the convolutions aren't earning their keep.
-
-Out-of-fold predictions (grouped/stratified by edr_bin, so no event leaks across folds)
-give an honest skill estimate; a final model is fit on all events for reuse.
-
-    python -m src.models.baseline_xgb            # CV + fit + report
+Features: spatial mean/max/std per diagnostic channel + climate + time + sat.
+Output: models/xgb_baseline.json + OOF predictions + feature importances.
 """
 
-from __future__ import annotations
-
-import argparse
 import logging
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-
-from src.data.dataset import (
-    CLIMATE_NAMES, SAT_FEATURES, build_raw_samples, make_folds,
-)
+from sklearn.metrics import mean_squared_error
+from sklearn.model_selection import GroupKFold
+import xgboost as xgb
 
 log = logging.getLogger(__name__)
+
 MODELS_DIR = Path("models")
+MAX_EDR    = 0.95
 
 
-def pool_features(rs) -> tuple[np.ndarray, list[str]]:
-    """Spatial mean/max/std per diagnostic channel + climate + time + satellite."""
-    d = rs.diag                                  # (N,C,H,W)
-    mean = d.mean(axis=(2, 3))
-    mx = d.max(axis=(2, 3))
-    sd = d.std(axis=(2, 3))
-    X = np.concatenate([mean, mx, sd, rs.climate, rs.time, rs.sat], axis=1)
+def pool_features(samples) -> tuple[np.ndarray, np.ndarray, list[str]]:
+    """Flatten per-event diagnostics to a feature vector."""
+    rows, targets = [], []
+    feat_names = None
 
-    names = (
-        [f"{n}|mean" for n in rs.names]
-        + [f"{n}|max" for n in rs.names]
-        + [f"{n}|std" for n in rs.names]
-        + CLIMATE_NAMES
-        + ["sinDOY", "cosDOY", "sinHour", "cosHour"]
-        + SAT_FEATURES
+    for s in samples:
+        diag = s.diag  # (C, H, W)
+        C = diag.shape[0]
+        row = []
+        names = []
+        for c in range(C):
+            ch = diag[c].ravel()
+            row.extend([ch.mean(), ch.max(), ch.std()])
+            names.extend([f"diag{c}_mean", f"diag{c}_max", f"diag{c}_std"])
+        row.extend(s.climate.tolist())
+        names.extend(["ONI", "Nino34", "PDO", "QBO"])
+        row.extend(s.time.tolist())
+        names.extend(["sin_doy", "cos_doy", "sin_hr", "cos_hr"])
+        row.extend(s.sat.tolist())
+        row.append(float(s.sat_mask[0]))
+        names.extend(["tb_cold", "tb_mean", "tb_std", "tb_max", "tb_cooling", "sat_mask"])
+        rows.append(row)
+        targets.append(float(s.y_max) * MAX_EDR)
+        if feat_names is None:
+            feat_names = names
+
+    return np.array(rows, dtype=np.float32), np.array(targets, dtype=np.float32), feat_names
+
+
+def _metrics(y_true, y_pred):
+    rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+    corr = float(pd.Series(y_true).corr(pd.Series(y_pred)))
+    mae  = float(np.abs(y_true - y_pred).mean())
+    return dict(rmse=rmse, pearson=corr, mae=mae)
+
+
+def run(samples, n_folds: int = 5, seed: int = 42) -> dict:
+    X, y, feat_names = pool_features(samples)
+    groups = np.arange(len(samples))  # each event is its own group
+
+    oof_pred = np.zeros_like(y)
+    gkf = GroupKFold(n_splits=n_folds)
+    fold_metrics = []
+
+    for fold, (tr_idx, va_idx) in enumerate(gkf.split(X, y, groups)):
+        model = xgb.XGBRegressor(
+            n_estimators=300,
+            max_depth=4,
+            learning_rate=0.05,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            reg_alpha=0.1,
+            reg_lambda=1.0,
+            random_state=seed,
+            tree_method="hist",
+            verbosity=0,
+        )
+        model.fit(X[tr_idx], y[tr_idx],
+                  eval_set=[(X[va_idx], y[va_idx])],
+                  verbose=False)
+        oof_pred[va_idx] = model.predict(X[va_idx])
+        fold_metrics.append(_metrics(y[va_idx], oof_pred[va_idx]))
+        log.info("Fold %d  RMSE=%.4f  r=%.3f", fold + 1,
+                 fold_metrics[-1]["rmse"], fold_metrics[-1]["pearson"])
+
+    oof_m = _metrics(y, oof_pred)
+    log.info("OOF  RMSE=%.4f  r=%.3f  MAE=%.4f", oof_m["rmse"], oof_m["pearson"], oof_m["mae"])
+
+    # Final model on all data
+    final = xgb.XGBRegressor(
+        n_estimators=300, max_depth=4, learning_rate=0.05,
+        subsample=0.8, colsample_bytree=0.8,
+        reg_alpha=0.1, reg_lambda=1.0,
+        random_state=seed, tree_method="hist", verbosity=0,
     )
-    return X.astype(np.float32), names
+    final.fit(X, y)
 
-
-def _metrics(y_true_edr, y_pred_edr) -> dict:
-    err = y_pred_edr - y_true_edr
-    rmse = float(np.sqrt(np.mean(err ** 2)))
-    mae = float(np.mean(np.abs(err)))
-    r = float(np.corrcoef(y_true_edr, y_pred_edr)[0, 1]) if len(y_true_edr) > 1 else float("nan")
-    # log-space RMSE (the CNN's training metric) for apples-to-apples comparison
-    rmse_log = float(np.sqrt(np.mean((np.log1p(y_pred_edr) - np.log1p(y_true_edr)) ** 2)))
-    return {"rmse_edr": rmse, "mae_edr": mae, "pearson": r, "rmse_log": rmse_log}
-
-
-def run(n_folds: int = 5, seed: int = 42) -> dict:
-    import xgboost as xgb
-
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    rs = build_raw_samples()
-    X, feat_names = pool_features(rs)
-    y = np.log1p(rs.y_max)                        # train in log space, like the CNN
-
-    params = dict(
-        n_estimators=400, max_depth=4, learning_rate=0.03,
-        subsample=0.8, colsample_bytree=0.8, min_child_weight=2,
-        reg_lambda=1.0, objective="reg:squarederror", random_state=seed,
-    )
-
-    all_idx = np.arange(len(rs))
-    oof = np.full(len(rs), np.nan, dtype=np.float64)
-    for tr, va in make_folds(rs, all_idx, n_folds=n_folds, seed=seed):
-        model = xgb.XGBRegressor(**params)
-        model.fit(X[tr], y[tr])
-        oof[va] = model.predict(X[va])
-
-    m = _metrics(rs.y_max, np.expm1(oof))
-    log.info("XGBoost OOF | RMSE=%.4f EDR  MAE=%.4f  Pearson=%.3f  RMSE(log)=%.4f",
-             m["rmse_edr"], m["mae_edr"], m["pearson"], m["rmse_log"])
-
-    # final model on all data + feature importances
-    final = xgb.XGBRegressor(**params).fit(X, y)
     MODELS_DIR.mkdir(exist_ok=True)
     final.save_model(str(MODELS_DIR / "xgb_baseline.json"))
 
-    imp = pd.DataFrame({"feature": feat_names, "gain": final.feature_importances_}) \
-        .sort_values("gain", ascending=False)
-    imp.to_csv(MODELS_DIR / "xgb_baseline_importance.csv", index=False)
-    pd.DataFrame({
-        "event_id": rs.eids, "edr_bin": rs.bins,
-        "true_max_edr": rs.y_max, "pred_max_edr": np.expm1(oof),
-    }).to_csv(MODELS_DIR / "xgb_baseline_oof.csv", index=False)
+    imp_df = pd.DataFrame({"feature": feat_names, "importance": final.feature_importances_})
+    imp_df = imp_df.sort_values("importance", ascending=False).reset_index(drop=True)
+    imp_df.to_csv(str(MODELS_DIR / "xgb_importance.csv"), index=False)
 
-    log.info("Top features: %s", ", ".join(imp["feature"].head(8)))
-    log.info("Saved → models/xgb_baseline.json (+ importance, OOF predictions)")
-    return m
+    oof_df = pd.DataFrame({
+        "event_id": [s.event_id for s in samples],
+        "y_true":   y,
+        "y_pred":   oof_pred,
+        "edr_bin":  [s.edr_bin for s in samples],
+    })
+    oof_df.to_csv(str(MODELS_DIR / "xgb_oof.csv"), index=False)
+
+    return dict(oof=oof_m, fold_metrics=fold_metrics,
+                model=final, importance=imp_df, oof_df=oof_df)
 
 
 def main():
-    ap = argparse.ArgumentParser(description="XGBoost CAT accuracy baseline (no residual)")
-    ap.add_argument("--folds", type=int, default=5)
-    ap.add_argument("--seed", type=int, default=42)
-    args = ap.parse_args()
-    run(args.folds, args.seed)
+    import sys
+    sys.path.insert(0, ".")
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+    from src.data.dataset import build_raw_samples
+    samples = build_raw_samples()
+    run(samples)
 
 
 if __name__ == "__main__":

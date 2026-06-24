@@ -1,394 +1,339 @@
 """
-Dataset assembly for the physics-informed CAT CNN.
+CatDataset — assembles all per-event features for the CAT turbulence CNN.
 
-Brings together, per event:
-  • diagnostics   — (C, H, W) physics channels from src.features.diagnostics
-  • climate       — (4,) ONI, Niño3.4, PDO, QBO at the event month (broadcast channels + FiLM)
-  • time          — (4,) cyclic sin/cos of day-of-year and hour-of-day (FiLM conditioning)
-  • satellite     — (5,) scalar TB summary + present/absent mask (optional MLP stream)
-  • labels        — scalar max_edr / mean_edr from events.csv
-  • phys (raw)    — Ri, VWS, TI1 fields, *unnormalised*, for the physics-penalty losses
+Feature groups:
+  diag     : physics diagnostics from ERA5  (C_diag, H, W)
+  climate  : ONI + Nino3.4 + PDO + QBO     (4,)
+  time     : sin/cos DOY + sin/cos hour     (4,)
+  sat      : satellite TB stats             (5,)
+  sat_mask : float 0/1 (satellite present)  (1,)
+  phys     : Ri/VWS/TI1 at 250 hPa          (3,)
 
-Normalisation (per-channel z-score, heavy-tailed channels log-compressed first) is fitted on
-the TRAIN split only and persisted, exactly like the existing NumPy pipeline.
-
-Climate indices are fetched once from NOAA PSL, cached to data/climate_indices.csv, and the
-loader is offline-safe: if neither network nor cache is available it returns zeros and warns,
-so the rest of the pipeline still runs (the model just sees a null climate prior).
+Targets:
+  y_max  : max_edr normalised to [0,1]
+  y_mean : mean_edr normalised
 """
 
-from __future__ import annotations
-
 import logging
-import urllib.request
+import os
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-
-try:                       # torch is optional at import time (e.g. for the XGBoost baseline)
-    import torch
-    from torch.utils.data import Dataset
-    _HAS_TORCH = True
-except Exception:          # pragma: no cover
-    _HAS_TORCH = False
-    Dataset = object       # type: ignore
+import torch
+from torch.utils.data import Dataset
 
 from src.features.diagnostics import (
     DEFAULT_PRIMARY_LEVELS,
-    LOG_COMPRESS,
     load_or_compute,
+    channel_index,
+    channel_names,
 )
 
 log = logging.getLogger(__name__)
 
-# ─── Config ───────────────────────────────────────────────────────────────────
-EVENTS_CSV      = Path("events.csv")
-SAT_DIR         = Path("data/satellite")
-CLIMATE_CACHE   = Path("data/climate_indices.csv")
-NORM_PATH       = Path("models/cat_cnn_torch_norm.npz")
+EVENTS_CSV = Path("events.csv")
+ERA5_DIR   = Path("data/era5")
+SAT_DIR    = Path("data/satellite")
+DIAG_DIR   = Path("data/diagnostics")
 
-CLIMATE_NAMES   = ["ONI", "Nino34", "PDO", "QBO"]
-_PSL = "https://psl.noaa.gov/data/correlation/{}.data"
-_PSL_FILES = {"ONI": "oni", "Nino34": "nina34", "PDO": "pdo", "QBO": "qbo"}
-_UA = "cat-edr-ml/1.0 (research)"
-
-SAT_FEATURES    = ["tb_cold", "tb_mean", "tb_std", "tb_max", "tb_cooling"]
-PHYS_CHANNELS   = ["Ri", "VWS", "TI1"]    # raw fields handed to the physics losses
-
-MAX_EDR         = 0.95                     # observed dataset max (climatological bound)
+CLIMATE_NAMES  = ["ONI", "Nino34", "PDO", "QBO"]
+SAT_FEATURES   = ["tb_cold", "tb_mean", "tb_std", "tb_max", "tb_cooling"]
+PHYS_CHANNELS  = ["Ri", "VWS", "TI1"]   # scalar summary per channel at 250
+MAX_EDR        = 0.95
 
 
-# ─── Climate indices ──────────────────────────────────────────────────────────
+# ── Climate indices (NOAA PSL) ────────────────────────────────────────────────
 
-def _parse_psl(text: str) -> pd.Series:
-    """PSL '.data' format: header 'startyr endyr', then 'year v1..v12' rows."""
-    recs = {}
+_PSL_URLS = {
+    "ONI":    "https://psl.noaa.gov/data/correlation/oni.data",
+    "Nino34": "https://psl.noaa.gov/data/correlation/nina34.data",
+    "PDO":    "https://psl.noaa.gov/data/correlation/pdo.data",
+    "QBO":    "https://psl.noaa.gov/data/correlation/qbo.data",
+}
+_CLIMATE_CACHE = Path("data/climate_indices.csv")
+
+
+def _parse_psl(text: str, name: str) -> pd.DataFrame:
+    rows = []
     for line in text.splitlines():
-        t = line.split()
-        if len(t) != 13:
+        parts = line.split()
+        if not parts or not parts[0].isdigit():
             continue
+        year = int(parts[0])
+        vals = parts[1:]
+        for mo, v in enumerate(vals, 1):
+            try:
+                fv = float(v)
+                if abs(fv) < 90:  # sentinel removal
+                    rows.append({"year": year, "month": mo, name: fv})
+            except ValueError:
+                continue
+    return pd.DataFrame(rows).set_index(["year", "month"])
+
+
+def load_climate_table() -> pd.DataFrame:
+    if _CLIMATE_CACHE.exists():
+        return pd.read_csv(_CLIMATE_CACHE, index_col=["year", "month"])
+    import requests
+    dfs = []
+    for name, url in _PSL_URLS.items():
         try:
-            yr = int(t[0]); vals = [float(x) for x in t[1:]]
-        except ValueError:
-            continue
-        if not (1900 <= yr <= 2100):
-            continue
-        for mo, v in enumerate(vals, start=1):
-            recs[pd.Timestamp(yr, mo, 1)] = np.nan if v <= -90 else v
-    return pd.Series(recs).sort_index()
+            r = requests.get(url, timeout=15)
+            r.raise_for_status()
+            dfs.append(_parse_psl(r.text, name))
+        except Exception as exc:
+            log.warning("Failed to download %s: %s — using zeros", name, exc)
+            dfs.append(pd.DataFrame(columns=[name]))
+    climate = dfs[0]
+    for df in dfs[1:]:
+        climate = climate.join(df, how="outer")
+    climate = climate.fillna(0.0)
+    _CLIMATE_CACHE.parent.mkdir(parents=True, exist_ok=True)
+    climate.to_csv(_CLIMATE_CACHE)
+    return climate
 
 
-def load_climate_table(refresh: bool = False) -> pd.DataFrame:
-    """Monthly climate-index table indexed by month-start Timestamp.
-
-    Columns = CLIMATE_NAMES. Cached to data/climate_indices.csv. Offline-safe:
-    returns whatever can be loaded; missing indices become all-NaN columns.
-    """
-    if CLIMATE_CACHE.exists() and not refresh:
-        df = pd.read_csv(CLIMATE_CACHE, parse_dates=["date"]).set_index("date")
-        for c in CLIMATE_NAMES:
-            if c not in df.columns:
-                df[c] = np.nan
-        return df[CLIMATE_NAMES]
-
-    series = {}
-    for name, slug in _PSL_FILES.items():
-        try:
-            req = urllib.request.Request(_PSL.format(slug), headers={"User-Agent": _UA})
-            with urllib.request.urlopen(req, timeout=30) as r:
-                txt = r.read().decode("utf-8", "replace")
-            s = _parse_psl(txt)
-            if s.dropna().empty:
-                raise ValueError("no data parsed")
-            series[name] = s
-            log.info("  climate: fetched %-7s %d months", name, s.notna().sum())
-        except Exception as e:
-            log.warning("  climate: SKIP %-7s (%s) — will use zeros", name, e)
-            series[name] = pd.Series(dtype=float)
-
-    df = pd.DataFrame(series).sort_index()
-    if not df.empty:
-        CLIMATE_CACHE.parent.mkdir(parents=True, exist_ok=True)
-        df.reset_index(names="date").to_csv(CLIMATE_CACHE, index=False)
-        log.info("  climate: cached → %s", CLIMATE_CACHE)
-    return df.reindex(columns=CLIMATE_NAMES)
+def _climate_vector(dt: pd.Timestamp, table: pd.DataFrame) -> np.ndarray:
+    key = (dt.year, dt.month)
+    if key in table.index:
+        return table.loc[key].values.astype(np.float32)
+    return np.zeros(len(CLIMATE_NAMES), dtype=np.float32)
 
 
-def _climate_vector(ts: pd.Timestamp, table: pd.DataFrame) -> np.ndarray:
-    """Index values at the event month (most-recent ≤ month, i.e. forward-filled)."""
-    if table.empty:
-        return np.zeros(len(CLIMATE_NAMES), dtype=np.float32)
-    month = pd.Timestamp(ts.year, ts.month, 1)
-    sub = table[table.index <= month]
-    row = sub.iloc[-1] if len(sub) else table.iloc[0]
-    return row.reindex(CLIMATE_NAMES).fillna(0.0).values.astype(np.float32)
+# ── Time features ─────────────────────────────────────────────────────────────
+
+def cyclic_time(dt: pd.Timestamp) -> np.ndarray:
+    doy = dt.day_of_year
+    hour = dt.hour + dt.minute / 60.0
+    return np.array([
+        np.sin(2 * np.pi * doy  / 365.25),
+        np.cos(2 * np.pi * doy  / 365.25),
+        np.sin(2 * np.pi * hour / 24.0),
+        np.cos(2 * np.pi * hour / 24.0),
+    ], dtype=np.float32)
 
 
-# ─── Cyclic time ──────────────────────────────────────────────────────────────
-
-def cyclic_time(ts: pd.Timestamp) -> np.ndarray:
-    """(sin DOY, cos DOY, sin hour, cos hour) — keeps Dec-31/Jan-1 adjacent."""
-    doy = ts.dayofyear + ts.hour / 24.0
-    hod = ts.hour + ts.minute / 60.0
-    a = 2 * np.pi * doy / 365.25
-    b = 2 * np.pi * hod / 24.0
-    return np.array([np.sin(a), np.cos(a), np.sin(b), np.cos(b)], dtype=np.float32)
-
-
-# ─── Satellite scalar features ────────────────────────────────────────────────
+# ── Satellite features ────────────────────────────────────────────────────────
 
 def satellite_features(event_id: int) -> tuple[np.ndarray, float]:
-    """(5,) TB summary features + present-mask (1.0 if real data, else 0.0)."""
+    """
+    Returns (feat, mask) where feat is (5,) and mask is 1.0 if data present.
+    Features: tb_cold (min), tb_mean, tb_std, tb_max, tb_cooling (max-min).
+    """
     path = SAT_DIR / f"event_{event_id:04d}.parquet"
-    zero = np.zeros(len(SAT_FEATURES), dtype=np.float32)
     if not path.exists():
-        return zero, 0.0
+        return np.zeros(5, dtype=np.float32), 0.0
     try:
         df = pd.read_parquet(path)
         if df.empty:
-            return zero, 0.0
-        if "scan_time" in df.columns:
-            df = df.sort_values("scan_time")
-        cooling = float(df["tb_mean"].iloc[-1] - df["tb_mean"].iloc[0]) if len(df) > 1 else 0.0
-        feat = np.array([
-            float(df["tb_min"].min()),    # coldest cloud top
-            float(df["tb_mean"].mean()),
-            float(df["tb_std"].mean()),
-            float(df["tb_max"].mean()),
-            cooling,                       # Δ tb_mean across snapshots (negative ⇒ deepening)
-        ], dtype=np.float32)
-        return feat, 1.0
+            return np.zeros(5, dtype=np.float32), 0.0
+        tb_cold   = float(df["tb_min"].min())
+        tb_mean   = float(df["tb_mean"].mean())
+        tb_std    = float(df["tb_std"].mean())
+        tb_max    = float(df["tb_max"].max())
+        tb_cooling = tb_max - tb_cold
+        return np.array([tb_cold, tb_mean, tb_std, tb_max, tb_cooling], dtype=np.float32), 1.0
     except Exception:
-        return zero, 0.0
+        return np.zeros(5, dtype=np.float32), 0.0
 
 
-# ─── Build all per-event arrays ───────────────────────────────────────────────
+# ── Raw sample container ──────────────────────────────────────────────────────
 
-class RawSamples:
-    """In-memory bundle of all per-event arrays (pre-normalisation)."""
+class RawSample:
+    __slots__ = ("event_id", "diag", "climate", "time", "sat", "sat_mask",
+                 "phys", "y_max", "y_mean", "edr_bin")
 
-    def __init__(self, diag, climate, time, sat, sat_mask, phys,
-                 y_max, y_mean, eids, bins, times, names):
-        self.diag = diag          # (N, C, H, W)
-        self.climate = climate    # (N, 4)
-        self.time = time          # (N, 4)
-        self.sat = sat            # (N, 5)
-        self.sat_mask = sat_mask  # (N,)
-        self.phys = phys          # (N, len(PHYS_CHANNELS), H, W) raw
-        self.y_max = y_max        # (N,)
-        self.y_mean = y_mean      # (N,)
-        self.eids = eids          # (N,)
-        self.bins = bins          # (N,) str
-        self.times = times        # (N,) pd.Timestamp
-        self.names = names        # list[str] diagnostic channel names
-
-    def __len__(self):
-        return len(self.eids)
+    def __init__(self, **kw):
+        for k, v in kw.items():
+            setattr(self, k, v)
 
 
 def build_raw_samples(
-    events_csv: str | Path = EVENTS_CSV,
-    era5_dir: str | Path = "data/era5",
-    diag_dir: str | Path = "data/diagnostics",
-    primary_levels=DEFAULT_PRIMARY_LEVELS,
+    primary_levels: list[int] = DEFAULT_PRIMARY_LEVELS,
     grid_size: int = 24,
-) -> RawSamples:
-    events = pd.read_csv(events_csv)
+) -> list[RawSample]:
+    events = pd.read_csv(EVENTS_CSV)
     climate_table = load_climate_table()
+    names = channel_names(primary_levels)
+    phys_indices = [i for i, n in enumerate(names) if any(n.startswith(p + "@") for p in PHYS_CHANNELS)]
 
-    diag_l, clim_l, time_l, sat_l, mask_l, phys_l = [], [], [], [], [], []
-    ymax_l, ymean_l, eid_l, bin_l, time_idx = [], [], [], [], []
-    names: list[str] = []
-
-    # locate raw phys channels once names are known
-    phys_idx = None
-
+    samples = []
     for _, row in events.iterrows():
         eid = int(row["event_id"])
-        X, ch_names = load_or_compute(eid, era5_dir, diag_dir, primary_levels, grid_size)
-        if X is None:
+        result = load_or_compute(eid, str(ERA5_DIR), str(DIAG_DIR), primary_levels, grid_size)
+        if result is None:
             continue
-        if not names:
-            names = ch_names
-            phys_idx = [_first_level_index(p, names) for p in PHYS_CHANNELS]
+        diag, _ = result
+        dt = pd.Timestamp(row["start_utc"]).tz_convert("UTC") if hasattr(pd.Timestamp(row["start_utc"]), "tz_convert") else pd.Timestamp(row["start_utc"])
 
-        ts = pd.to_datetime(row["start_utc"], utc=True).tz_convert("UTC").tz_localize(None)
-        sat_feat, mask = satellite_features(eid)
+        climate = _climate_vector(dt, climate_table)
+        time_f  = cyclic_time(dt)
+        sat_f, sat_mask = satellite_features(eid)
 
-        diag_l.append(X)
-        phys_l.append(X[phys_idx].copy())           # raw (pre-norm) Ri/VWS/TI1
-        clim_l.append(_climate_vector(ts, climate_table))
-        time_l.append(cyclic_time(ts))
-        sat_l.append(sat_feat)
-        mask_l.append(mask)
-        ymax_l.append(min(float(row["max_edr"]), MAX_EDR))
-        ymean_l.append(float(row["mean_edr"]))
-        eid_l.append(eid)
-        bin_l.append(str(row["edr_bin"]))
-        time_idx.append(ts)
+        # Physics scalars: spatial mean of selected channels
+        phys = np.array([diag[i].mean() for i in phys_indices], dtype=np.float32)
 
-    if not diag_l:
-        raise RuntimeError(
-            "No events with diagnostics found. Pull ERA5 (scripts/step3...) and run "
-            "`python -m src.features.diagnostics` first."
-        )
+        y_max  = min(float(row["max_edr"])  / MAX_EDR, 1.0)
+        y_mean = min(float(row["mean_edr"]) / MAX_EDR, 1.0)
 
-    rs = RawSamples(
-        diag=np.stack(diag_l).astype(np.float32),
-        climate=np.stack(clim_l).astype(np.float32),
-        time=np.stack(time_l).astype(np.float32),
-        sat=np.stack(sat_l).astype(np.float32),
-        sat_mask=np.array(mask_l, dtype=np.float32),
-        phys=np.stack(phys_l).astype(np.float32),
-        y_max=np.array(ymax_l, dtype=np.float32),
-        y_mean=np.array(ymean_l, dtype=np.float32),
-        eids=np.array(eid_l, dtype=int),
-        bins=np.array(bin_l),
-        times=np.array(time_idx),
-        names=names,
-    )
-    log.info("Built %d samples | diag %s | sat present: %d/%d",
-             len(rs), rs.diag.shape, int(rs.sat_mask.sum()), len(rs))
-    return rs
+        samples.append(RawSample(
+            event_id=eid,
+            diag=diag,
+            climate=climate,
+            time=time_f,
+            sat=sat_f,
+            sat_mask=np.array([sat_mask], dtype=np.float32),
+            phys=phys,
+            y_max=np.float32(y_max),
+            y_mean=np.float32(y_mean),
+            edr_bin=str(row["edr_bin"]),
+        ))
+    log.info("Built %d raw samples", len(samples))
+    return samples
 
 
-def _first_level_index(short: str, names: list[str]) -> int:
-    for i, n in enumerate(names):
-        if n.split("@")[0] == short:
-            return i
-    raise KeyError(f"diagnostic {short} not in channels {names[:5]}...")
+# ── Normalisation ─────────────────────────────────────────────────────────────
 
-
-# ─── Normalisation ────────────────────────────────────────────────────────────
-
-def _log_mask(names: list[str]) -> np.ndarray:
-    return np.array([n.split("@")[0] in LOG_COMPRESS for n in names], dtype=bool)
-
-
-def _apply_log(diag: np.ndarray, log_mask: np.ndarray) -> np.ndarray:
-    """Signed-log compress heavy-tailed channels in place-safe fashion."""
-    out = diag.copy()
-    idx = np.where(log_mask)[0]
-    out[:, idx] = np.sign(out[:, idx]) * np.log1p(np.abs(out[:, idx]))
+def _log_mask(X: np.ndarray, channel_names_list: list[str]) -> np.ndarray:
+    from src.features.diagnostics import LOG_COMPRESS
+    out = X.copy()
+    for i, n in enumerate(channel_names_list):
+        base = n.split("@")[0]
+        if base in LOG_COMPRESS:
+            out[:, i] = np.sign(out[:, i]) * np.log1p(np.abs(out[:, i]))
     return out
 
 
-def fit_normalisation(rs: RawSamples, train_idx: np.ndarray) -> dict:
-    """Fit per-channel diag stats + climate/sat stats on the training split only."""
-    log_mask = _log_mask(rs.names)
-    diag_tr = _apply_log(rs.diag[train_idx], log_mask)
-    diag_mu = diag_tr.mean(axis=(0, 2, 3), keepdims=True)
-    diag_sig = diag_tr.std(axis=(0, 2, 3), keepdims=True) + 1e-6
-
-    clim_tr = rs.climate[train_idx]
-    clim_mu = clim_tr.mean(axis=0, keepdims=True)
-    clim_sig = clim_tr.std(axis=0, keepdims=True) + 1e-6
-
-    present = rs.sat_mask[train_idx] > 0
-    if present.sum() >= 2:
-        sat_mu = rs.sat[train_idx][present].mean(axis=0, keepdims=True)
-        sat_sig = rs.sat[train_idx][present].std(axis=0, keepdims=True) + 1e-6
-    else:
-        sat_mu = np.zeros((1, len(SAT_FEATURES)), dtype=np.float32)
-        sat_sig = np.ones((1, len(SAT_FEATURES)), dtype=np.float32)
-
-    return dict(
-        diag_mu=diag_mu.astype(np.float32), diag_sig=diag_sig.astype(np.float32),
-        clim_mu=clim_mu.astype(np.float32), clim_sig=clim_sig.astype(np.float32),
-        sat_mu=sat_mu.astype(np.float32), sat_sig=sat_sig.astype(np.float32),
-        log_mask=log_mask, names=np.array(rs.names),
-    )
+def _apply_log(x: np.ndarray, channel_names_list: list[str]) -> np.ndarray:
+    from src.features.diagnostics import LOG_COMPRESS
+    out = x.copy()
+    for i, n in enumerate(channel_names_list):
+        base = n.split("@")[0]
+        if base in LOG_COMPRESS:
+            out[i] = np.sign(out[i]) * np.log1p(np.abs(out[i]))
+    return out
 
 
-def save_norm(stats: dict, path: str | Path = NORM_PATH) -> None:
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    np.savez(path, **stats)
+class NormStats:
+    def __init__(self, diag_mu, diag_sig, sat_mu, sat_sig, phys_mu, phys_sig):
+        self.diag_mu  = diag_mu
+        self.diag_sig = diag_sig
+        self.sat_mu   = sat_mu
+        self.sat_sig  = sat_sig
+        self.phys_mu  = phys_mu
+        self.phys_sig = phys_sig
 
 
-def load_norm(path: str | Path = NORM_PATH) -> dict:
-    d = np.load(path, allow_pickle=True)
-    return {k: d[k] for k in d.files}
+def fit_normalisation(samples: list[RawSample], cnames: list[str]) -> NormStats:
+    diags  = np.stack([s.diag for s in samples])  # (N,C,H,W)
+    diags  = _log_mask(diags.reshape(len(samples), len(cnames), -1).mean(-1), cnames)
+    # per-channel mean/std over spatial mean
+    diag_mu  = diags.mean(0)
+    diag_sig = diags.std(0).clip(min=1e-6)
+
+    sats = np.stack([s.sat for s in samples if s.sat_mask[0] > 0])
+    sat_mu  = sats.mean(0) if len(sats) > 0 else np.zeros(5, dtype=np.float32)
+    sat_sig = (sats.std(0).clip(min=1e-6) if len(sats) > 0 else np.ones(5, dtype=np.float32))
+
+    phys = np.stack([s.phys for s in samples])
+    phys_mu  = phys.mean(0)
+    phys_sig = phys.std(0).clip(min=1e-6)
+
+    return NormStats(diag_mu, diag_sig, sat_mu, sat_sig, phys_mu, phys_sig)
 
 
-# ─── Splits (group-aware / temporal) ──────────────────────────────────────────
-
-def temporal_holdout(rs: RawSamples, frac: float = 0.2) -> tuple[np.ndarray, np.ndarray]:
-    """Most-recent `frac` of events (by start time) become the held-out test set."""
-    order = np.argsort(rs.times)
-    n_test = max(1, int(round(frac * len(order))))
-    test = np.sort(order[-n_test:])
-    trainval = np.sort(order[:-n_test])
-    return trainval, test
+def save_norm(norm: NormStats, path: str) -> None:
+    np.savez(path,
+             diag_mu=norm.diag_mu, diag_sig=norm.diag_sig,
+             sat_mu=norm.sat_mu,   sat_sig=norm.sat_sig,
+             phys_mu=norm.phys_mu, phys_sig=norm.phys_sig)
 
 
-def make_folds(rs: RawSamples, idx: np.ndarray, n_folds: int = 5, seed: int = 42):
-    """Stratified-by-edr_bin K-fold over events. Each event is one sample, so by
-    construction no event leaks across folds (the group-by-event guarantee). Cluster-
-    level grouping is a future hook if events.csv gains a cluster id."""
-    try:
-        from sklearn.model_selection import StratifiedKFold
-        skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=seed)
-        return [(idx[tr], idx[va]) for tr, va in skf.split(idx, rs.bins[idx])]
-    except Exception:
-        rng = np.random.default_rng(seed)
-        perm = rng.permutation(idx)
-        return [(np.setdiff1d(idx, va), va) for va in np.array_split(perm, n_folds)]
+def load_norm(path: str) -> NormStats:
+    d = np.load(path)
+    return NormStats(d["diag_mu"], d["diag_sig"],
+                     d["sat_mu"],  d["sat_sig"],
+                     d["phys_mu"], d["phys_sig"])
 
 
-# ─── Torch Dataset ────────────────────────────────────────────────────────────
+# ── Train/val splits ──────────────────────────────────────────────────────────
 
-if _HAS_TORCH:
+def temporal_holdout(samples: list[RawSample], test_frac: float = 0.15):
+    """Chronological holdout — last test_frac of events by event_id."""
+    n = len(samples)
+    split = int(n * (1 - test_frac))
+    return samples[:split], samples[split:]
 
-    class CatDataset(Dataset):
-        """Normalised tensors for one split. `stats` come from fit_normalisation()."""
 
-        def __init__(self, rs: RawSamples, indices: np.ndarray, stats: dict,
-                     augment: bool = False, seed: int = 0):
-            self.rs = rs
-            self.idx = np.asarray(indices)
-            self.stats = stats
-            self.augment = augment
-            self.rng = np.random.default_rng(seed)
-            self._log_mask = np.asarray(stats["log_mask"])
+def make_folds(
+    samples: list[RawSample],
+    n_folds: int = 5,
+    seed: int = 42,
+) -> list[tuple[list[RawSample], list[RawSample]]]:
+    """Stratified k-fold by edr_bin, group-safe (each event in exactly one fold)."""
+    rng = np.random.default_rng(seed)
+    bins = [s.edr_bin for s in samples]
+    unique_bins = sorted(set(bins))
+    fold_indices: list[list[int]] = [[] for _ in range(n_folds)]
+    for b in unique_bins:
+        idx = [i for i, s in enumerate(samples) if s.edr_bin == b]
+        idx = rng.permutation(idx).tolist()
+        for k, i in enumerate(idx):
+            fold_indices[k % n_folds].append(i)
+    folds = []
+    for k in range(n_folds):
+        val_idx = set(fold_indices[k])
+        tr  = [samples[i] for i in range(len(samples)) if i not in val_idx]
+        val = [samples[i] for i in fold_indices[k]]
+        folds.append((tr, val))
+    return folds
 
-        def __len__(self):
-            return len(self.idx)
 
-        def _norm_diag(self, X: np.ndarray) -> np.ndarray:
-            X = X.copy()
-            ix = np.where(self._log_mask)[0]
-            X[ix] = np.sign(X[ix]) * np.log1p(np.abs(X[ix]))
-            return (X - self.stats["diag_mu"][0]) / self.stats["diag_sig"][0]
+# ── PyTorch Dataset ───────────────────────────────────────────────────────────
 
-        def __getitem__(self, i):
-            j = self.idx[i]
-            diag = self._norm_diag(self.rs.diag[j])
-            climate = (self.rs.climate[j] - self.stats["clim_mu"][0]) / self.stats["clim_sig"][0]
-            sat = (self.rs.sat[j] - self.stats["sat_mu"][0]) / self.stats["sat_sig"][0]
-            sat = sat * self.rs.sat_mask[j]      # zero-out features when absent
-            phys = self.rs.phys[j]               # raw, for physics losses
+class CatDataset(Dataset):
+    def __init__(
+        self,
+        samples: list[RawSample],
+        norm: NormStats,
+        cnames: list[str],
+        augment: bool = False,
+    ):
+        self.samples = samples
+        self.norm    = norm
+        self.cnames  = cnames
+        self.augment = augment
 
-            if self.augment:
-                diag, phys = self._augment(diag, phys)
+    def __len__(self):
+        return len(self.samples)
 
-            return {
-                "diag": torch.from_numpy(np.ascontiguousarray(diag)).float(),
-                "climate": torch.from_numpy(climate).float(),
-                "time": torch.from_numpy(self.rs.time[j]).float(),
-                "sat": torch.from_numpy(sat).float(),
-                "sat_mask": torch.tensor([self.rs.sat_mask[j]]).float(),
-                "phys": torch.from_numpy(np.ascontiguousarray(phys)).float(),
-                "y_max": torch.tensor([self.rs.y_max[j]]).float(),
-                "y_mean": torch.tensor([self.rs.y_mean[j]]).float(),
-                "eid": int(self.rs.eids[j]),
-            }
+    def __getitem__(self, idx):
+        s = self.samples[idx]
+        n = self.norm
 
-        def _augment(self, diag, phys):
-            """Flips only (90° rotations would require rotating wind vectors; the
-            diagnostics here are scalar invariants, so axis flips are safe)."""
-            if self.rng.random() < 0.5:
-                diag = diag[:, :, ::-1]; phys = phys[:, :, ::-1]
-            if self.rng.random() < 0.5:
-                diag = diag[:, ::-1, :]; phys = phys[:, ::-1, :]
-            return diag, phys
+        diag = _apply_log(s.diag, self.cnames).astype(np.float32)  # (C,H,W)
+        # per-channel normalise (use spatial mean stats, broadcast over H,W)
+        c = diag.shape[0]
+        diag = (diag - n.diag_mu[:, None, None]) / n.diag_sig[:, None, None]
+
+        if self.augment and np.random.rand() < 0.5:
+            diag = diag[:, :, ::-1].copy()
+
+        sat = s.sat.copy()
+        if s.sat_mask[0] > 0:
+            sat = (sat - n.sat_mu) / n.sat_sig
+
+        phys = (s.phys - n.phys_mu) / n.phys_sig
+
+        return {
+            "diag":     torch.from_numpy(diag),
+            "climate":  torch.from_numpy(s.climate),
+            "time":     torch.from_numpy(s.time),
+            "sat":      torch.from_numpy(sat),
+            "sat_mask": torch.from_numpy(s.sat_mask),
+            "phys":     torch.from_numpy(phys),
+            "y_max":    torch.tensor(s.y_max),
+            "y_mean":   torch.tensor(s.y_mean),
+            "eid":      torch.tensor(s.event_id),
+        }
