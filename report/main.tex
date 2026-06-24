@@ -14,6 +14,7 @@
 \usepackage{microtype}
 \usepackage{array}
 \usepackage{setspace}
+\usepackage{float}
 \onehalfspacing
 
 \captionsetup{font=small,labelfont=bf}
@@ -64,8 +65,10 @@ choice. A preliminary pure-NumPy CNN baseline attains an overall
 Pearson $r=0.885$ (RMSE $0.120$~\edrunit) but overfits
 (train $r=0.933$ vs.\ validation $r=0.736$) and is weak in the
 severe tail, directly motivating the regularised, physics-informed
-architecture. Rigorous validation of the full model (RQ1/RQ2) is the
-immediate next step.
+architecture. Rigorous validation of the full model against our two
+research questions---whether the CNN beats the physics and XGBoost
+baselines, and whether satellite data adds skill---is the immediate next
+step.
 \end{abstract}
 
 % =====================================================================
@@ -323,7 +326,7 @@ $\sim$100$\times$ above neighbours while flight volume only doubled---an
 excluded from all climatology/trend statistics and interpolated in the
 decomposition.
 
-\begin{figure}[tb]
+\begin{figure}[H]
   \centering
   \includegraphics[width=\columnwidth]{opt2_climatology.png}
   \caption{Seasonal and diurnal climatology of ACARS turbulence
@@ -335,7 +338,7 @@ decomposition.
   \label{fig:climatology}
 \end{figure}
 
-\begin{figure}[tb]
+\begin{figure}[H]
   \centering
   \includegraphics[width=\columnwidth]{opt2_decomposition.png}
   \caption{Seasonal decomposition of the daily turbulence rate
@@ -346,7 +349,7 @@ decomposition.
   \label{fig:decomp}
 \end{figure}
 
-\begin{figure}[t]
+\begin{figure}[H]
   \centering
   \includegraphics[width=\columnwidth]{opt2_heatmap.png}
   \caption{Month $\times$ hour (UTC) turbulence-frequency heatmap. The
@@ -384,7 +387,7 @@ correlated and need not sum to 100\%), so we treat them as indicative
 and lead with the robust 89.8\% synoptic figure of
 \S\ref{sec:eda-seasonal}.
 
-\begin{figure}[tb]
+\begin{figure}[H]
   \centering
   \includegraphics[width=\columnwidth]{emd_turbulence.png}
   \caption{EMD of the monthly turbulence \emph{rate} (\texttt{frac\_m}).
@@ -394,7 +397,7 @@ and lead with the robust 89.8\% synoptic figure of
   \label{fig:emd}
 \end{figure}
 
-\begin{figure}[tb]
+\begin{figure}[H]
   \centering
   \includegraphics[width=\columnwidth]{eemd_turbulence.png}
   \caption{EEMD (100 trials) of the monthly turbulence \emph{intensity}
@@ -427,7 +430,7 @@ ONI, Ni\~no3.4, PDO, and QBO as model inputs but impose \emph{no}
 down-weighting---the network learns their (small) weight. A
 winter-stratified NAO/AO analysis is left to future work.
 
-\begin{figure}[tb]
+\begin{figure}[H]
   \centering
   \includegraphics[width=\columnwidth]{climate_indices.png}
   \caption{Lagged cross-correlations of EEMD turbulence modes against
@@ -436,7 +439,7 @@ winter-stratified NAO/AO analysis is left to future work.
   \label{fig:climate}
 \end{figure}
 
-\begin{figure}[tb]
+\begin{figure}[H]
   \centering
   \includegraphics[width=\columnwidth]{climate_amplitude.png}
   \caption{Amplitude-modulation (Hilbert-envelope) test. Apparent
@@ -457,7 +460,7 @@ Fig.~\ref{fig:regional}). The clear geographic and seasonal structure of
 encounter rates supports a spatial (CNN) treatment and the box-based
 event sampling we adopt.
 
-\begin{figure}[tb]
+\begin{figure}[H]
   \centering
   \includegraphics[width=\columnwidth]{regional_heatmaps.png}
   \caption{Month $\times$ hour (UTC) turbulence-proxy heatmaps for 15
@@ -487,7 +490,7 @@ droppable} stream with an explicit present/absent mask, with suggested
 encodings \texttt{tb\_std}, $(220-\texttt{tb\_min})$, and a cooling
 $\Delta\texttt{tb}$. This analysis directly frames \textbf{RQ2}.
 
-\begin{figure}[t]
+\begin{figure}[H]
   \centering
   \includegraphics[width=\columnwidth]{opt5_lag_correlations.png}
   \caption{Spearman correlation of satellite brightness-temperature
@@ -497,7 +500,7 @@ $\Delta\texttt{tb}$. This analysis directly frames \textbf{RQ2}.
   \label{fig:sat-lag}
 \end{figure}
 
-\begin{figure}[tb]
+\begin{figure}[H]
   \centering
   \includegraphics[width=\columnwidth]{opt5_scatter_tb_edr.png}
   \caption{Satellite TB vs.\ ACARS mean EDR scatter at lag 0 (top) and
@@ -507,7 +510,7 @@ $\Delta\texttt{tb}$. This analysis directly frames \textbf{RQ2}.
   \label{fig:sat-scatter}
 \end{figure}
 
-\begin{figure}[tb]
+\begin{figure}[H]
   \centering
   \includegraphics[width=\columnwidth]{opt5_timeseries_examples.png}
   \caption{Example events: satellite IR brightness temperature (line)
@@ -533,7 +536,7 @@ test of \S\ref{sec:results}. Geographic projection of the scores shows
 mild clustering, with the highest-PC1 (most intense) events at higher
 latitudes (Fig.~\ref{fig:pca-geo}).
 
-\begin{figure}[tb]
+\begin{figure}[H]
   \centering
   \includegraphics[width=\columnwidth]{pca_acars.png}
   \caption{PCA of ACARS event features (150 events, 16 features). PC1
@@ -542,7 +545,7 @@ latitudes (Fig.~\ref{fig:pca-geo}).
   \label{fig:pca-acars}
 \end{figure}
 
-\begin{figure}[tb]
+\begin{figure}[H]
   \centering
   \includegraphics[width=\columnwidth]{pca_era5.png}
   \caption{PCA of ERA5 atmospheric features (29 features). PC1 (41.4\%)
@@ -552,7 +555,7 @@ latitudes (Fig.~\ref{fig:pca-geo}).
   \label{fig:pca-era5}
 \end{figure}
 
-\begin{figure}[t]
+\begin{figure}[H]
   \centering
   \includegraphics[width=\columnwidth]{pca_geo.png}
   \caption{Geographic distribution of PC1 (EDR-intensity) and PC2 scores
@@ -774,7 +777,7 @@ Light      &  37 & 0.102 & 0.072 & $-0.107$ \\
 \end{tabular}
 \end{table}
 
-\begin{figure}[t]
+\begin{figure}[H]
   \centering
   \includegraphics[width=\columnwidth]{cnn_pred_vs_obs.png}
   \caption{Preliminary NumPy-CNN predictions. (a)~Predicted vs.\
@@ -875,7 +878,9 @@ bounds), with a GTG-style surrogate and XGBoost as baselines and an
 ablatable satellite stream to answer whether imagery adds skill. A
 preliminary NumPy reference confirms the signal is learnable ($r=0.885$)
 while exposing the overfitting and heavy-tail behaviour the full design
-targets. Rigorous validation (RQ1/RQ2) is the immediate next step.
+targets. Rigorous validation of the two research questions (RQ1: skill
+vs.\ the surrogate and XGBoost baselines; RQ2: satellite added skill) is
+the immediate next step.
 Future work includes the direct-vs-residual A/B; promoting the heatmap
 to dense supervision via sparse-to-dense ACARS-track labels (changing
 only the loss); Himawari coverage for global regions; COSMIC-2 vertical
