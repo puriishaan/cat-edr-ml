@@ -1,428 +1,460 @@
 """
-Generate model.png — detailed CatCNNTorch architecture diagram.
-Run from repo root: python generate_model_diagram.py
+Generate model.png — 3D perspective CatCNNTorch architecture diagram.
 """
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+from matplotlib.patches import Polygon
 import matplotlib.patches as mpatches
-from matplotlib.patches import FancyBboxPatch
 import numpy as np
+import colorsys
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Canvas
-# ─────────────────────────────────────────────────────────────────────────────
-FW, FH = 26, 16
+# ── Canvas ────────────────────────────────────────────────────────────────────
+FW, FH = 30, 14
 fig, ax = plt.subplots(figsize=(FW, FH), dpi=160)
-ax.set_xlim(0, FW)
-ax.set_ylim(0, FH)
+ax.set_xlim(-0.5, FW + 0.5)
+ax.set_ylim(-4.5, FH)
 ax.axis('off')
-BG = '#f0f2f5'
-fig.patch.set_facecolor(BG)
-ax.set_facecolor(BG)
+fig.patch.set_facecolor('#ffffff')
+ax.set_facecolor('#ffffff')
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Colours
-# ─────────────────────────────────────────────────────────────────────────────
-CD  = '#1565c0'   # diag input
-CC  = '#6a1b9a'   # conditioning
-CS  = '#e65100'   # satellite
-CE  = '#1976d2'   # encoder conv
-CF  = '#7b1fa2'   # FiLM
-CB  = '#00695c'   # bottleneck
-CSK = '#2e7d32'   # skip
-CDK = '#0277bd'   # decoder conv
-CH  = '#b71c1c'   # head / softplus
-CA  = '#e65100'   # aggregation
-CL  = '#263238'   # loss box
-CHY = '#4e342e'   # hyperparams box
+# ── Colours ──────────────────────────────────────────────────────────────────
+BLUE   = '#3a7bd5'   # encoder conv
+BLUE2  = '#2563b0'   # second conv in same block
+RED    = '#e04e3a'   # max pool
+GREEN  = '#1e8449'   # decoder conv
+GREEN2 = '#166a3a'
+PURPLE = '#7d3c98'   # FiLM
+ORANGE = '#ca6f1e'   # satellite
+TEAL   = '#0e7b67'   # bottleneck
+GOLD   = '#b7950b'   # head
+GRAY_I = '#566573'   # input
+SK_C   = '#27ae60'   # skip connection
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Helper: draw a rounded box with multi-line text
-# ─────────────────────────────────────────────────────────────────────────────
-def box(cx, cy, w, h, color, text, fs=7.5, tc='white', alpha=0.93, lw=1.4, zorder=4):
-    p = FancyBboxPatch((cx - w/2, cy - h/2), w, h,
-                        boxstyle='round,pad=0.07,rounding_size=0.12',
-                        facecolor=color, edgecolor='white',
-                        linewidth=lw, alpha=alpha, zorder=zorder)
-    ax.add_patch(p)
-    ax.text(cx, cy, text, ha='center', va='center', fontsize=fs,
-            color=tc, fontweight='bold', zorder=zorder+1,
-            multialignment='center', linespacing=1.3)
+def _rgb(h):
+    h = h.lstrip('#')
+    return (int(h[:2], 16)/255, int(h[2:4], 16)/255, int(h[4:], 16)/255)
 
-def arr(x1, y1, x2, y2, color='#37474f', lw=1.6, asz=10, style='->'):
-    ax.annotate('', xy=(x2, y2), xytext=(x1, y1),
-                arrowprops=dict(arrowstyle=style, color=color,
-                                lw=lw, mutation_scale=asz))
+def lc(c, a=0.28):
+    r,g,b = _rgb(c) if isinstance(c,str) else c
+    h,s,v = colorsys.rgb_to_hsv(r,g,b)
+    return colorsys.hsv_to_rgb(h, max(0,s-0.15), min(1,v+a))
 
-def arr_curve(x1, y1, x2, y2, color, lw=1.5, rad=0.0, asz=10):
-    ax.annotate('', xy=(x2, y2), xytext=(x1, y1),
+def dc(c, a=0.22):
+    r,g,b = _rgb(c) if isinstance(c,str) else c
+    h,s,v = colorsys.rgb_to_hsv(r,g,b)
+    return colorsys.hsv_to_rgb(h, min(1,s+0.05), max(0,v-a))
+
+PX, PY = 0.42, 0.26   # perspective offset per unit depth
+
+# ── Core drawing primitive ────────────────────────────────────────────────────
+def blk(x, y0, w, h, d, color, alpha=1.0, lw=0.8, zr=3, ec='white'):
+    dx, dy = PX*d, PY*d
+    for pts, fc in [
+        ([[x,y0],[x+w,y0],[x+w,y0+h],[x,y0+h]], color),
+        ([[x,y0+h],[x+w,y0+h],[x+w+dx,y0+h+dy],[x+dx,y0+h+dy]], lc(color)),
+        ([[x+w,y0],[x+w+dx,y0+dy],[x+w+dx,y0+h+dy],[x+w,y0+h]], dc(color)),
+    ]:
+        ax.add_patch(Polygon(np.array(pts, dtype=float), closed=True,
+                             fc=fc, ec=ec, lw=lw, alpha=alpha, zorder=zr))
+    return dict(x=x, y0=y0, w=w, h=h, d=d, dx=dx, dy=dy,
+                xR=x+w+dx, xFR=x+w, xFL=x,
+                yMid=y0+h/2, yTop=y0+h+dy, yTopF=y0+h,
+                yMidR=y0+h/2+dy/2)
+
+def arr(x1,y1,x2,y2, color='#2c3e50', lw=1.5, asz=10):
+    ax.annotate('', xy=(x2,y2), xytext=(x1,y1),
+                arrowprops=dict(arrowstyle='->', color=color, lw=lw,
+                                mutation_scale=asz), zorder=12)
+
+def arcc(x1,y1,x2,y2, color, lw=1.5, rad=0.3, asz=11):
+    ax.annotate('', xy=(x2,y2), xytext=(x1,y1),
                 arrowprops=dict(arrowstyle='->', color=color, lw=lw,
                                 mutation_scale=asz,
-                                connectionstyle=f'arc3,rad={rad}'))
+                                connectionstyle=f'arc3,rad={rad}'), zorder=12)
 
-def label(cx, cy, text, fs=6.5, color='#455a64', bold=False, italic=False):
-    ax.text(cx, cy, text, ha='center', va='center', fontsize=fs, color=color,
+def txt(x,y,s,fs=7,c='#1c2833',ha='center',va='center',
+        bold=False,italic=False,zr=14):
+    ax.text(x,y,s,ha=ha,va=va,fontsize=fs,color=c,zorder=zr,
             fontweight='bold' if bold else 'normal',
-            fontstyle='italic' if italic else 'normal')
+            fontstyle='italic' if italic else 'normal',
+            multialignment='center',linespacing=1.35)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Title
-# ─────────────────────────────────────────────────────────────────────────────
-ax.text(13, 15.55, 'CatCNNTorch — Physics-Informed U-Net Architecture',
-        ha='center', va='center', fontsize=15, fontweight='bold', color='#0d1b2a')
-ax.text(13, 15.1, '36 input channels (12 diagnostics × 3 levels)  |  '
-                  'depth=3  |  base_filters=32  |  ≈80k parameters  |  '
-                  'grid: 24×24 (≈0.25° × 2° event box)',
-        ha='center', va='center', fontsize=8.5, color='#546e7a', style='italic')
+# ── Spatial geometry ──────────────────────────────────────────────────────────
+YC = 4.8   # vertical centre
+# block heights keyed by spatial dim
+H  = {24: 6.0, 12: 4.5, 6: 3.0, 3: 1.8}
+# visual depth keyed by channel count
+D  = {36:1.5, 32:1.35, 64:1.85, 128:2.6, 256:3.5, 272:3.6, 1:0.5}
 
-# ─────────────────────────────────────────────────────────────────────────────
-# COLUMN LAYOUT
-#   col 0: labels/headers
-#   col 1 (x=2.0):  input streams
-#   col 2 (x=4.8):  encoder stage 1
-#   col 3 (x=7.5):  encoder stage 2
-#   col 4 (x=10.2): encoder stage 3
-#   col 5 (x=12.9): bottleneck + satellite fusion
-#   col 6 (x=15.6): decoder stage 3 (→ 6×6)
-#   col 7 (x=18.3): decoder stage 2 (→ 12×12)
-#   col 8 (x=21.0): decoder stage 1 (→ 24×24)
-#   col 9 (x=23.5): head + aggregation
-#   loss panel: right side (floated)
-# ─────────────────────────────────────────────────────────────────────────────
+def y0(sp): return YC - H[sp]/2
 
-# Row heights (top to bottom)
-# R_TOP = 12.8  encoder / decoder bodies
-# R_MID = 10.7  FiLM modules
-# R_BOT =  8.5  pool labels / skip labels
-# R_BTL =  6.2  bottleneck row
-# R_SAT =  4.0  satellite MLP
+# ── X-layout  ─────────────────────────────────────────────────────────────────
+# Each ConvBlock = 2 thin slabs (w=0.25 each) + FiLM (w=0.16)
+# MaxPool = thin red slab (w=0.20)
+# Gaps tuned for ~28 total units
 
-R_TOP = 12.5
-R_FILM = 11.0
-R_SKIP = 9.8
-R_BTL  = 7.2
-R_SAT  = 4.8
+SLAB = 0.25   # single conv layer slab width
+FILM = 0.17
+POOL = 0.20
+BTL  = 0.28
+GAP  = 0.14   # gap between slabs in same block
+STG  = 0.40   # gap between stages
 
-# ─── SECTION HEADER BANDS ────────────────────────────────────────────────────
-def hband(y1, y2, color, text, xa=0.45):
-    r = FancyBboxPatch((xa, y1), 1.3, y2-y1,
-                        boxstyle='round,pad=0.05,rounding_size=0.1',
-                        facecolor=color, edgecolor='none', alpha=0.18, zorder=2)
-    ax.add_patch(r)
-    ax.text(xa + 0.65, (y1+y2)/2, text, ha='center', va='center', fontsize=7,
-            color=color, fontweight='bold', rotation=90, zorder=3)
+x = 0.5
+positions = {}
 
-hband(R_BTL+0.6, R_TOP+0.6, CD, 'ENCODER', 0.3)
-hband(R_BTL+0.6, R_TOP+0.6, CDK, 'DECODER', 23.3)
+def _adv(name, w, d):
+    positions[name] = x
 
-# ─── SECTION LABEL TAPE ──────────────────────────────────────────────────────
-for xc, lbl, col in [
-    (2.0, 'Inputs', '#37474f'),
-    (4.8, 'Enc-1\n24×24', CE),
-    (7.5, 'Enc-2\n12×12', CE),
-    (10.2, 'Enc-3\n6×6', CE),
-    (12.9, 'Bottleneck\n3×3', CB),
-    (15.6, 'Dec-3\n6×6', CDK),
-    (18.3, 'Dec-2\n12×12', CDK),
-    (21.0, 'Dec-1\n24×24', CDK),
-    (23.5, 'Head\n& Agg.', CH),
-]:
-    ax.text(xc, 14.6, lbl, ha='center', va='center', fontsize=7.5,
-            color=col, fontweight='bold', multialignment='center')
+def advance(name, w, d, gap_after=0.0):
+    global x
+    positions[name] = x
+    x += w + PX*d + gap_after
 
-# ─────────────────────────────────────────────────────────────────────────────
-# INPUT COLUMN  (x = 2.0)
-# ─────────────────────────────────────────────────────────────────────────────
-IX = 2.0
-box(IX, R_TOP, 2.8, 1.4, CD,
-    'Physics Diagnostics\n'
-    '(B, 36, 24, 24)\n'
-    '12 diag × 3 levels\n'
-    '(225 / 250 / 300 hPa)',
-    fs=7.5)
+# INPUT
+advance('inp', 0.40, D[36], 0.30)
 
-box(IX, 11.3, 2.8, 0.9, CC,
-    'Climate indices  (B, 4)\n'
-    'ONI · Niño3.4 · PDO · QBO', fs=7)
-box(IX, 10.3, 2.8, 0.9, CC,
-    'Cyclic time  (B, 4)\n'
-    'sin/cos(DOY) · sin/cos(hour)', fs=7)
+# ENC-1  (24×24, 36→32)
+advance('e1a', SLAB, D[32], GAP)   # conv slab 1
+advance('e1b', SLAB, D[32], GAP)   # conv slab 2
+advance('e1f', FILM, D[32], GAP)   # FiLM
+advance('e1p', POOL, D[32], STG)   # MaxPool
 
-# concat climate+time
-box(IX, 9.3, 1.6, 0.65, CC, 'cat → cond  (B, 8)', fs=7)
-arr(IX, 11.3-0.45, IX, 9.3+0.33, color=CC, lw=1.3)
-arr(IX, 10.3-0.45, IX, 9.3+0.33, color=CC, lw=1.3)
+# ENC-2  (12×12, 32→64)
+advance('e2a', SLAB, D[64], GAP)
+advance('e2b', SLAB, D[64], GAP)
+advance('e2f', FILM, D[64], GAP)
+advance('e2p', POOL, D[64], STG)
 
-box(IX, R_SAT, 2.8, 1.5, CS,
-    'Satellite MLP  (optional)\n'
-    'Input: (B, 6)  [5 TB stats + mask]\n'
-    '  tb_cold · tb_mean · tb_std\n'
-    '  tb_max · Δtb · avail. mask\n'
-    '→ Lin(32, GELU) → Lin(16)',
-    fs=7)
+# ENC-3  (6×6, 64→128)
+advance('e3a', SLAB, D[128], GAP)
+advance('e3b', SLAB, D[128], GAP)
+advance('e3f', FILM, D[128], GAP)
+advance('e3p', POOL, D[128], STG)
 
-label(IX, R_SAT-1.0,
-      'Covers 64/150 events (2017+)\nzero-padded when absent',
-      fs=6.5, color=CS, italic=True)
+# BOTTLENECK (3×3, 128→256) + satellite fusion slab
+advance('btla', BTL, D[256], GAP)
+advance('btlb', BTL, D[256], GAP)
+advance('btlf', FILM, D[256], GAP)
+advance('bsat', FILM, D[272], STG)   # satellite fusion marker
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ENCODER  (three stages)
-# ─────────────────────────────────────────────────────────────────────────────
-ENC_XS  = [4.8, 7.5, 10.2]
-ENC_INS = [36,  32,  64]
-ENC_OTS = [32,  64,  128]
-ENC_SPS = ['24×24', '12×12', '6×6']
-ENC_SP2 = ['12×12', '6×6', '3×3']
+# DEC-3  (6×6, 272→128)
+advance('d3a', SLAB, D[128], GAP)
+advance('d3b', SLAB, D[128], STG)
 
-for i, (ex, ei, eo, sp, sp2) in enumerate(
-        zip(ENC_XS, ENC_INS, ENC_OTS, ENC_SPS, ENC_SP2)):
+# DEC-2  (12×12, 128→64)
+advance('d2a', SLAB, D[64], GAP)
+advance('d2b', SLAB, D[64], STG)
 
-    # ConvBlock
-    box(ex, R_TOP, 2.2, 1.6, CE,
-        f'ConvBlock  {sp}\n'
-        f'Conv(3×3) {ei}→{eo}\n'
-        f'BatchNorm → GELU\n'
-        f'Dropout2d(p=0.10)\n'
-        f'Conv(3×3) {eo}→{eo}\n'
-        f'+ residual 1×1',
-        fs=7)
+# DEC-1  (24×24, 64→32)
+advance('d1a', SLAB, D[32], GAP)
+advance('d1b', SLAB, D[32], 0.35)
 
-    # FiLM after ConvBlock
-    box(ex, R_FILM, 2.0, 0.85, CF,
-        f'FiLM  (cond_dim=8 → {2*eo})\n'
-        f'x ← x·(γ+1) + β  [identity init]\n'
-        f'Lin(8,{2*eo}) → chunk(γ,β)',
-        fs=6.5)
+# HEAD (24×24, 32→1)
+advance('hd', 0.30, D[1], 0.55)
 
-    # cond → FiLM
-    arr(IX, 9.3-0.32, ex, R_FILM+0.42, color=CC, lw=1.2, asz=8)
+AGG_X = x + 0.6
 
-    # ConvBlock → FiLM
-    arr(ex, R_TOP-0.8, ex, R_FILM+0.42, color=CE, lw=1.3)
+print(f"Total width: {x:.1f}")
 
-    # FiLM → pool
-    pool_y = R_SKIP
-    box(ex, pool_y, 2.0, 0.7, CE,
-        f'MaxPool2d(2)  {sp} → {sp2}',
-        fs=7, alpha=0.8)
-    arr(ex, R_FILM-0.42, ex, pool_y+0.35, color=CE, lw=1.3)
+# ── Draw all blocks ───────────────────────────────────────────────────────────
+B = {}   # name → block info dict
 
-    # Pool → next encoder (or bottleneck)
-    if i < 2:
-        arr(ex + 1.1, pool_y, ENC_XS[i+1]-1.1, R_TOP-0.8, color=CE, lw=1.5)
-    else:
-        # Pool → bottleneck
-        arr(ex + 1.1, pool_y, 12.9-1.1, R_BTL+0.7, color=CE, lw=1.5)
+def enc_blk(n, sp, ch, color):
+    B[n] = blk(positions[n], y0(sp), SLAB, H[sp], D[ch], color)
 
-# Input → Enc-1
-arr(IX+1.4, R_TOP, ENC_XS[0]-1.1, R_TOP, color=CD, lw=2)
+def pool_blk(n, sp, ch):
+    B[n] = blk(positions[n], y0(sp), POOL, H[sp], D[ch], RED)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# SKIP CONNECTIONS  (at FiLM-output level → decoder concat level)
-# ─────────────────────────────────────────────────────────────────────────────
-DEC_XS = [15.6, 18.3, 21.0]
-SKIP_YS = [R_FILM, R_FILM, R_FILM]
+def film_blk(n, sp, ch):
+    B[n] = blk(positions[n], y0(sp), FILM, H[sp], D[ch], PURPLE, alpha=0.9)
 
-# enc1 skip → dec1   enc2 → dec2   enc3 → dec3
-for i, (ex, dx, ch, sp) in enumerate(
-        zip(ENC_XS, reversed(DEC_XS), ENC_OTS, ENC_SPS)):
-    # draw dashed horizontal skip line at an offset y so they don't overlap
-    y_skip = R_FILM - 0.0 + i * 0.0
-    ax.annotate('', xy=(dx, R_SKIP+0.15 + i*0.18), xytext=(ex, R_SKIP+0.15 + i*0.18),
-                arrowprops=dict(arrowstyle='->', color=CSK, lw=1.6,
-                                linestyle='dashed', mutation_scale=10))
-    ax.text((ex + dx)/2, R_SKIP+0.15 + i*0.18 + 0.18,
-            f'skip  ({ch} ch, {sp})',
-            ha='center', va='bottom', fontsize=6.5, color=CSK, style='italic')
+# Input
+B['inp'] = blk(positions['inp'], y0(24), 0.40, H[24], D[36], GRAY_I)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# BOTTLENECK  (x = 12.9)
-# ─────────────────────────────────────────────────────────────────────────────
-BX = 12.9
-box(BX, R_BTL, 2.5, 1.55, CB,
-    'Bottleneck  3×3\n'
-    'ConvBlock  128→256\n'
-    '3×3, BatchNorm, GELU\n'
-    'Dropout2d(0.10)\n'
-    '+ residual 1×1',
-    fs=7.5)
+# Encoder 1
+enc_blk('e1a', 24, 32, BLUE)
+enc_blk('e1b', 24, 32, BLUE2)
+film_blk('e1f', 24, 32)
+pool_blk('e1p', 24, 32)
 
-box(BX, R_BTL-1.15, 2.4, 0.85, CF,
-    'FiLM  (cond=8 → 512)\n'
-    'x ← x·(γ+1) + β  [identity init]',
-    fs=6.8)
-arr(BX, R_BTL-0.77, BX, R_BTL-1.15+0.42, color=CF, lw=1.2)
-# cond → bottleneck FiLM
-arr(IX, 9.3-0.32, BX, R_BTL-0.73, color=CC, lw=1.2, asz=8)
+# Encoder 2
+enc_blk('e2a', 12, 64, BLUE)
+enc_blk('e2b', 12, 64, BLUE2)
+film_blk('e2f', 12, 64)
+pool_blk('e2p', 12, 64)
 
-# Satellite fusion
-box(BX, R_SAT+0.3, 2.5, 1.4, CS,
-    'Satellite fusion\n'
-    'sat_vec (B,16) broadcast\n'
-    '→ (B,16,3,3)\n'
-    'cat( bottleneck, sat_map )\n'
-    '→ (B, 272, 3, 3)',
-    fs=7)
-arr(IX+1.4, R_SAT, BX-1.25, R_SAT+0.3, color=CS, lw=1.5)   # satellite MLP → fusion
-arr(BX, R_BTL-1.55, BX, R_SAT+1.0, color=CB, lw=1.5)        # bottleneck → fusion
+# Encoder 3
+enc_blk('e3a', 6, 128, BLUE)
+enc_blk('e3b', 6, 128, BLUE2)
+film_blk('e3f', 6, 128)
+pool_blk('e3p', 6, 128)
 
-# fusion → first decoder
-arr(BX+1.25, R_SAT+0.55, DEC_XS[0]-1.1, R_BTL, color=CB, lw=1.5)
+# Bottleneck
+B['btla'] = blk(positions['btla'], y0(3), BTL, H[3], D[256], TEAL)
+B['btlb'] = blk(positions['btlb'], y0(3), BTL, H[3], D[256], dc(TEAL, 0.08))
+B['btlf'] = blk(positions['btlf'], y0(3), FILM, H[3], D[256], PURPLE, alpha=0.9)
+B['bsat'] = blk(positions['bsat'], y0(3), FILM, H[3], D[272], ORANGE)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# DECODER  (three stages)
-# ─────────────────────────────────────────────────────────────────────────────
-DEC_INS  = [272, 128, 64]    # in channels (after prev upsample)
-DEC_SKIP = [128, 64, 32]     # skip channels
-DEC_CATS = [256, 128, 64]    # after concat
-DEC_OTS  = [128, 64, 32]     # output channels
-DEC_SP_IN= ['3×3', '6×6', '12×12']
-DEC_SP_OT= ['6×6', '12×12', '24×24']
+# Decoder 3
+enc_blk('d3a', 6, 128, GREEN)
+enc_blk('d3b', 6, 128, GREEN2)
 
-for i, (dx, di, ds, dc, do_, si, so) in enumerate(
-        zip(DEC_XS, DEC_INS, DEC_SKIP, DEC_CATS, DEC_OTS, DEC_SP_IN, DEC_SP_OT)):
+# Decoder 2
+enc_blk('d2a', 12, 64, GREEN)
+enc_blk('d2b', 12, 64, GREEN2)
 
-    # Upsample + 1×1
-    box(dx, R_BTL+0.2, 2.2, 0.9, CDK,
-        f'↑2× bilinear  {si}→{so}\n'
-        f'Conv1×1  {di}→{ds}  |  cat skip({ds})\n'
-        f'→ ({dc}, {so})',
-        fs=6.8)
+# Decoder 1
+enc_blk('d1a', 24, 32, GREEN)
+enc_blk('d1b', 24, 32, GREEN2)
 
-    # ConvBlock
-    box(dx, R_TOP, 2.2, 1.6, CDK,
-        f'ConvBlock  {so}\n'
-        f'Conv(3×3) {dc}→{do_}\n'
-        f'BatchNorm → GELU\n'
-        f'Dropout2d(0.10)\n'
-        f'Conv(3×3) {do_}→{do_}\n'
-        f'+ residual 1×1',
-        fs=7)
-
-    # Upsample → ConvBlock
-    arr(dx, R_BTL+0.65, dx, R_TOP-0.8, color=CDK, lw=1.3)
-
-    if i < 2:
-        arr(dx+1.1, R_BTL+0.2, DEC_XS[i+1]-1.1, R_BTL+0.2, color=CDK, lw=1.5)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# HEAD + AGGREGATION  (x ≈ 23.5)
-# ─────────────────────────────────────────────────────────────────────────────
-HX = 23.5
 # Head
-box(HX, R_TOP-0.15, 2.4, 1.35, CH,
-    'Head\n'
-    'Conv1×1(32 → 1)\n'
-    'Softplus  →  ≥ 0\n'
-    'EDR field  (B,1,24,24)',
-    fs=7.5)
-# dec1 → head
-arr(DEC_XS[2]+1.1, R_TOP, HX-1.2, R_TOP-0.15, color=CDK, lw=1.8)
+B['hd'] = blk(positions['hd'], y0(24), 0.30, H[24], D[1], GOLD)
 
-# Aggregation
-box(HX, R_FILM-0.1, 2.4, 1.5, CA,
-    'Soft Aggregation\n'
-    '─────────────────\n'
-    'max_hat: logsumexp(field)\n'
-    '         − log(576)  (τ=8.0)\n'
-    'mean_hat: field.mean()\n'
-    '─────────────────\n'
-    'alt: top-k mean  (k=4)',
-    fs=7)
-arr(HX, R_TOP-0.82, HX, R_FILM+0.65, color=CA, lw=1.5)
+# ── Stage-group labels (below blocks) ─────────────────────────────────────────
+def grp_label(keys, text, fs=7, c='#1c2833'):
+    xs = [positions[k] for k in keys]
+    xe = max(positions[k] + (SLAB if k not in ('inp','btla','btlb','bsat','hd') else 0.4)
+             + PX*D.get(36 if k=='inp' else 32, 1.5) for k in keys)
+    mid = (xs[0] + xe) / 2
+    txt(mid, y0(24)-0.32, text, fs=fs, c=c)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# LOSS PANEL  (box below, centred under the full diagram)
-# ─────────────────────────────────────────────────────────────────────────────
-LX, LY, LW, LH = 13.0, 2.65, 23.5, 3.5
-p = FancyBboxPatch((LX-LW/2, LY-LH/2), LW, LH,
-                    boxstyle='round,pad=0.1,rounding_size=0.2',
-                    facecolor=CL, edgecolor='white', linewidth=2,
-                    alpha=0.93, zorder=3)
-ax.add_patch(p)
+def dim_label(key, sp, ch, below=True):
+    b = B[key]
+    y = b['y0'] - 0.22 if below else b['yTop'] + 0.12
+    txt(b['x'] + b['w']/2, y, f'{ch}×{sp}×{sp}', fs=6, c='#1c2833', italic=True)
 
-ax.text(LX, LY+LH/2-0.28, 'Physics-Informed Loss Function',
-        ha='center', va='center', fontsize=11, color='white',
-        fontweight='bold', zorder=5)
+# Labels under first slab of each group
+txt(positions['inp'] + 0.2, y0(24)-0.5,
+    '36 ch\n24×24\nPhysics\nDiag.', fs=6.5, c=GRAY_I)
 
-LCOLS = 4
+for (ka, kb, kf, kp, sp, chin, chout) in [
+    ('e1a','e1b','e1f','e1p', 24, 36, 32),
+    ('e2a','e2b','e2f','e2p', 12, 32, 64),
+    ('e3a','e3b','e3f','e3p',  6, 64, 128),
+]:
+    cx = (positions[ka] + positions[kp] + POOL + PX*D[chout]) / 2
+    txt(cx, y0(sp)-0.42, f'Conv+BN+GELU×2\n{chin}→{chout}ch  ·  {sp}×{sp}', fs=6.5)
+    txt(positions[kf]+FILM/2, y0(sp)-0.42, 'FiLM\n(cond8)', fs=5.8, c=PURPLE)
+    txt(positions[kp]+POOL/2, y0(sp)-0.42, 'MaxPool\n÷2', fs=5.8, c='#922b21')
+
+txt((positions['btla']+positions['btlf']+FILM+PX*D[256])/2, y0(3)-0.42,
+    'Bottleneck  128→256ch  ·  3×3\n+ FiLM', fs=6.5, c=TEAL)
+txt(positions['bsat']+FILM/2+PX*D[272]/2, y0(3)-0.42,
+    'Sat\nFusion\n→272ch', fs=5.8, c=ORANGE)
+
+for (ka, kb, sp, ch) in [('d3a','d3b',6,128), ('d2a','d2b',12,64), ('d1a','d1b',24,32)]:
+    cx = (positions[ka] + positions[kb] + SLAB + PX*D[ch]) / 2
+    txt(cx, y0(sp)-0.42, f'↑2× biliear · skip cat\n{ch*2}→{ch}ch  ·  {sp}×{sp}', fs=6.5, c=GREEN)
+
+txt(positions['hd']+0.15, y0(24)-0.52, 'Conv1×1\n1ch\nSoftplus\nEDR field', fs=6.5, c=GOLD)
+
+# ── Sequential flow arrows ─────────────────────────────────────────────────────
+def flow(n1, n2, yf=None):
+    b1, b2 = B[n1], B[n2]
+    y1 = yf if yf else b1['yMid']
+    y2 = yf if yf else b2['yMid']
+    arr(b1['xFR'], y1, b2['xFL'], y2)
+
+def pool_transition(pname, nxt, sp_from, sp_to, ch):
+    """Arrow from pool block to next encoder stage (height changes)."""
+    b1, b2 = B[pname], B[nxt]
+    arr(b1['xFR'], b1['yMid'], b2['xFL'], b2['yMid'], color='#922b21')
+
+# Within-stage flows
+for pairs in [
+    [('inp','e1a'), ('e1a','e1b'), ('e1b','e1f'), ('e1f','e1p')],
+    [('e2a','e2b'), ('e2b','e2f'), ('e2f','e2p')],
+    [('e3a','e3b'), ('e3b','e3f'), ('e3f','e3p')],
+    [('btla','btlb'), ('btlb','btlf'), ('btlf','bsat')],
+    [('d3a','d3b')],
+    [('d2a','d2b')],
+    [('d1a','d1b'), ('d1b','hd')],
+]:
+    for n1, n2 in pairs:
+        flow(n1, n2)
+
+# Pool transitions (changing height)
+pool_transition('e1p', 'e2a', 24, 12, 32)
+pool_transition('e2p', 'e3a', 12,  6, 64)
+pool_transition('e3p', 'btla', 6,  3, 128)
+
+# Bottleneck sat → decoder
+arr(B['bsat']['xFR'], B['bsat']['yMid'], B['d3a']['xFL'], B['d3a']['yMid'],
+    color=ORANGE, lw=1.5)
+
+# Decoder stage transitions (height increases)
+arr(B['d3b']['xFR'], B['d3b']['yMid'], B['d2a']['xFL'], B['d2a']['yMid'], color=GREEN)
+arr(B['d2b']['xFR'], B['d2b']['yMid'], B['d1a']['xFL'], B['d1a']['yMid'], color=GREEN)
+
+# Head → aggregation
+arr(B['hd']['xFR'], B['hd']['yMid']+0.6, AGG_X-0.05, YC+1.1)
+arr(B['hd']['xFR'], B['hd']['yMid']-0.6, AGG_X-0.05, YC-0.8)
+
+# ── Skip connections (arcs over the top) ──────────────────────────────────────
+# Enc-1 → Dec-1  (widest, highest arc)
+arcc(B['e1b']['xFR']+B['e1b']['dx']*0.5, B['e1b']['yTop'],
+     B['d1a']['xFL']+B['d1a']['dx']*0.3, B['d1a']['yTop'],
+     color=SK_C, lw=1.8, rad=-0.22)
+txt((B['e1b']['xFR']+B['d1a']['xFL'])/2 + 2.0, 12.4, 'skip  32 ch', fs=6.5, c=SK_C, italic=True)
+
+# Enc-2 → Dec-2
+arcc(B['e2b']['xFR']+B['e2b']['dx']*0.5, B['e2b']['yTop'],
+     B['d2a']['xFL']+B['d2a']['dx']*0.3, B['d2a']['yTop'],
+     color=SK_C, lw=1.8, rad=-0.20)
+txt((B['e2b']['xFR']+B['d2a']['xFL'])/2 + 1.0, 11.3, 'skip  64 ch', fs=6.5, c=SK_C, italic=True)
+
+# Enc-3 → Dec-3
+arcc(B['e3b']['xFR']+B['e3b']['dx']*0.5, B['e3b']['yTop'],
+     B['d3a']['xFL']+B['d3a']['dx']*0.3, B['d3a']['yTop'],
+     color=SK_C, lw=1.8, rad=-0.18)
+txt((B['e3b']['xFR']+B['d3a']['xFL'])/2, 10.2, 'skip  128 ch', fs=6.5, c=SK_C, italic=True)
+
+# ── FiLM conditioning strip ───────────────────────────────────────────────────
+COND_Y = 12.95
+ax.text(0.3, COND_Y,
+        'FiLM conditioning  (cond_dim = 8):   '
+        'Climate (ONI, Niño3.4, PDO, QBO)  +  '
+        'Cyclic time (sin/cos DOY, sin/cos hour-UTC)',
+        ha='left', va='center', fontsize=7.5, color='white', zorder=14,
+        bbox=dict(boxstyle='round,pad=0.35', facecolor=PURPLE, ec='#5b2c6f', lw=1.2))
+
+# arrows from cond strip down to each FiLM slab
+for fname, sp in [('e1f',24), ('e2f',12), ('e3f',6), ('btlf',3)]:
+    bx = positions[fname] + FILM/2
+    arr(bx, COND_Y-0.22, bx, B[fname]['yTopF']+0.06, color=PURPLE, lw=1.1, asz=8)
+
+# ── Satellite input (below, into fusion slab) ─────────────────────────────────
+sat_cx = positions['bsat'] + FILM/2 + PX*D[272]*0.3
+sat_iy = -3.4
+ax.text(sat_cx, sat_iy,
+        'Satellite MLP\n'
+        '[tb_cold, tb_mean, tb_std, tb_max, Δtb]\n'
+        '+ availability mask  (0 = absent, 1 = present)\n'
+        'Lin(6→32, GELU) → Lin(32→16)\n'
+        'broadcast → (16, H, W) → cat\n'
+        'Covers 64/150 events (2017+)',
+        ha='center', va='center', fontsize=7, color='white', zorder=14,
+        bbox=dict(boxstyle='round,pad=0.4', facecolor=ORANGE, ec='#873600', lw=1.3))
+arr(sat_cx, sat_iy + 0.98, sat_cx, B['bsat']['y0'] - 0.1, color=ORANGE, lw=1.6)
+txt(sat_cx+1.5, sat_iy+0.5, 'ablatable\n(zero when absent)', fs=6.5, c=ORANGE, italic=True)
+
+# ── Aggregation boxes ─────────────────────────────────────────────────────────
+ax.text(AGG_X+0.25, YC+1.1,
+        'LogSumExp  (τ=8.0)\n'
+        'or Top-k mean  (k=4)\n'
+        '→ max_hat  (B,)',
+        ha='center', va='center', fontsize=7.5, color='#1c2833',
+        bbox=dict(boxstyle='round,pad=0.35', facecolor='#fdebd0', ec='#ca6f1e', lw=1.5),
+        zorder=14)
+ax.text(AGG_X+0.25, YC-0.8,
+        'field.mean()\n→ mean_hat  (B,)',
+        ha='center', va='center', fontsize=7.5, color='#1c2833',
+        bbox=dict(boxstyle='round,pad=0.35', facecolor='#d6eaf8', ec='#1a6fa0', lw=1.5),
+        zorder=14)
+
+# ── Physics Loss panel ────────────────────────────────────────────────────────
 loss_items = [
-    ('①  Base: log1p-Huber(max_hat, y_max)',
-     'Huber(δ=0.10) on log1p-space predictions vs labels\n'
-     'Magnitude weight: w = (1 + y_max)²  [amplifies rare severe events]'),
-    ('②  Auxiliary mean  [λ = 0.20]',
-     'Huber(log1p(mean_hat), log1p(y_mean))\n'
-     'Soft field-average constraint'),
-    ('③  Ri / Shear Gating  [λ = 0.10]',
-     'If Ri > 0.25 everywhere: flow is stable → penalise non-zero field\n'
-     'Encodes Kelvin–Helmholtz theory directly in the loss'),
-    ('④  TI1 Consistency  [λ = 0.10]',
-     'Penalise negative rank-correlation between TI1 and field max\n'
-     'High Ellrod index should co-locate with high predicted EDR'),
-    ('⑤  Total Variation  [λ = 0.05]',
-     'TV(field) = mean(|∂field/∂x| + |∂field/∂y|)\n'
-     'Spatial coherence: penalises salt-and-pepper noise'),
-    ('⑥  Climatological Cap  [λ = 0.05]',
-     'ReLU(field − 1.05).mean()\n'
-     'Softplus can exceed 1.0; penalise predictions above observed max EDR'),
-    ('Optimiser:  AdamW',
-     'lr=1e-3 · wd=1e-4 · batch=16\ngrad-clip norm=5 · patience=30 · ≤200 epochs'),
-    ('Hyperparameter search:  Optuna (TPE)',
-     '40 trials × 4-fold · 80-epoch budget\n'
-     'Objective: log-RMSE + (1 − AUPRC@EDR≥0.20)'),
+    '① Base:  log1p-Huber(max_hat, y_max)\n   weight = (1 + y_max)²   [amplify severe tail]',
+    '② λ=0.20 · Huber(mean_hat, y_mean)\n   soft field-average constraint',
+    '③ λ=0.10 · Ri gating\n   Ri > 0.25 → penalise non-zero field\n   [KH instability theory]',
+    '④ λ=0.10 · TI1 consistency\n   penalise −corr(TI1, field max)\n   [Ellrod index]',
+    '⑤ λ=0.05 · Total Variation\n   TV(field) = |∂x| + |∂y|\n   spatial coherence',
+    '⑥ λ=0.05 · Cap penalty\n   ReLU(field − 1.05)\n   bounded by obs max EDR',
 ]
+LX, LY0 = 0.3, -4.2
+LW_cell = (FW - 1.0) / len(loss_items)
+for i, txt_s in enumerate(loss_items):
+    cx = LX + (i + 0.5) * LW_cell
+    ax.text(cx, LY0, txt_s,
+            ha='center', va='center', fontsize=6.8, color='white',
+            bbox=dict(boxstyle='round,pad=0.35', facecolor='#1a252f',
+                      ec='#566573', lw=0.9),
+            zorder=14, multialignment='center', linespacing=1.3)
+ax.text(FW/2, LY0 + 1.25,
+        'Physics-Informed Loss Function',
+        ha='center', va='center', fontsize=9.5, color='#1a252f',
+        fontweight='bold')
 
-ncols = 4
-nrows = 2
-cell_w = LW / ncols
-cell_h = (LH - 0.6) / nrows
+# Arrows from aggregation down to loss
+arr(AGG_X+0.25, YC-1.4, AGG_X+0.25, LY0+1.0, color='#566573', lw=1.2)
+txt(AGG_X+1.2, (YC-1.4+LY0+1.0)/2, '← ACARS\ny_max, y_mean', fs=6.5, c='#e74c3c')
 
-for idx, (title, body) in enumerate(loss_items):
-    col = idx % ncols
-    row = idx // ncols
-    cx = LX - LW/2 + cell_w*(col+0.5)
-    cy = LY + LH/2 - 0.6 - cell_h*(row+0.5)
-    ax.text(cx, cy+0.15, title, ha='center', va='top', fontsize=7.5,
-            color='#ffecb3', fontweight='bold', zorder=5)
-    ax.text(cx, cy-0.05, body, ha='center', va='top', fontsize=6.8,
-            color='#b0bec5', zorder=5, multialignment='center', linespacing=1.3)
+# ── Title ─────────────────────────────────────────────────────────────────────
+ax.text(FW/2, FH - 0.35,
+        'CatCNNTorch — Physics-Informed U-Net Architecture',
+        ha='center', va='center', fontsize=15, fontweight='bold', color='#0d1b2a', zorder=15)
+ax.text(FW/2, FH - 0.78,
+        '36 input channels  (12 diagnostics × 3 pressure levels: 225 / 250 / 300 hPa)   ·   '
+        'depth = 3   ·   base_filters = 32   ·   ≈80k parameters   ·   '
+        'FiLM conditioning   ·   ablatable satellite stream',
+        ha='center', va='center', fontsize=8, color='#5d6d7e',
+        fontstyle='italic', zorder=15)
 
-# arrows from aggregation down to loss box
-arr(HX-0.6, R_FILM-0.85, HX-0.6, LY+LH/2+0.05, color=CA, lw=1.5)
-arr(HX+0.6, R_FILM-0.85, HX+0.6, LY+LH/2+0.05, color=CA, lw=1.5)
-ax.text(HX-1.6, (R_FILM-0.85+LY+LH/2)/2, 'max_hat', fontsize=7,
-        color=CA, ha='right', va='center', fontweight='bold')
-ax.text(HX+1.6, (R_FILM-0.85+LY+LH/2)/2, 'mean_hat', fontsize=7,
-        color=CA, ha='left', va='center', fontweight='bold')
-
-# ACARS ground truth arrow into loss
-ax.text(LX+14.0, LY+0.3, 'ACARS in-situ EDR\n(y_max, y_mean)',
-        ha='center', va='center', fontsize=8, color='#ef9a9a',
-        fontweight='bold', zorder=5)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# LEGEND
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Legend ────────────────────────────────────────────────────────────────────
 patches = [
-    mpatches.Patch(color=CD, label='Physics Diagnostic Input  (36 ch)'),
-    mpatches.Patch(color=CC, label='FiLM Conditioning  (cond_dim=8)'),
-    mpatches.Patch(color=CS, label='Satellite Stream  (optional, masked)'),
-    mpatches.Patch(color=CE, label='Encoder ConvBlock  + FiLM'),
-    mpatches.Patch(color=CB, label='Bottleneck  (256→272 ch)'),
-    mpatches.Patch(color=CSK, label='Skip Connection'),
-    mpatches.Patch(color=CDK, label='Decoder ConvBlock  + Upsample'),
-    mpatches.Patch(color=CH, label='Head  (Conv1×1 + Softplus)'),
-    mpatches.Patch(color=CA, label='Soft Aggregation  (logsumexp / top-k)'),
-    mpatches.Patch(color=CL, label='Physics-Informed Loss'),
+    mpatches.Patch(fc=GRAY_I, ec='w', label='Physics Diag. Input (36 ch)'),
+    mpatches.Patch(fc=BLUE,   ec='w', label='Encoder Conv Layer (3×3, BN, GELU, Dropout2d)'),
+    mpatches.Patch(fc=RED,    ec='w', label='MaxPool2d (÷2)'),
+    mpatches.Patch(fc=PURPLE, ec='w', label='FiLM  (γ,β ← cond_dim=8; identity-init)'),
+    mpatches.Patch(fc=TEAL,   ec='w', label='Bottleneck (128→256 ch, 3×3)'),
+    mpatches.Patch(fc=ORANGE, ec='w', label='Satellite Fusion (ablatable)'),
+    mpatches.Patch(fc=GREEN,  ec='w', label='Decoder Conv (↑2× bilinear + skip concat)'),
+    mpatches.Patch(fc=GOLD,   ec='w', label='Head: Conv1×1 + Softplus → EDR field'),
+    mpatches.Patch(fc=SK_C,   ec='w', label='U-Net Skip Connection (cat)'),
 ]
-leg = ax.legend(handles=patches, loc='upper left', fontsize=7.5,
-                bbox_to_anchor=(0.01, 0.99), framealpha=0.9,
-                ncol=2, title='Component', title_fontsize=8,
-                edgecolor='#90a4ae')
+leg = ax.legend(handles=patches, loc='upper left',
+                bbox_to_anchor=(0.0, 0.93), fontsize=7.5,
+                framealpha=0.97, ncol=3, edgecolor='#bdc3c7',
+                title='Component legend', title_fontsize=8.5)
+
+# ── Component bounding boxes (numbered, for elaboration in the paper) ─────────
+from matplotlib.patches import FancyBboxPatch, Circle
+
+def zone(x0, x1, y0_, y1_, num, color, lw=2.2):
+    r = FancyBboxPatch((x0, y0_), x1 - x0, y1_ - y0_,
+                       boxstyle='round,pad=0.04,rounding_size=0.18',
+                       fill=False, edgecolor=color, lw=lw,
+                       linestyle=(0, (6, 3)), zorder=11, alpha=0.95)
+    ax.add_patch(r)
+    # numbered badge at top-left
+    bx, by = x0 + 0.32, y1_ - 0.05
+    ax.add_patch(Circle((bx, by), 0.30, facecolor=color, edgecolor='white',
+                        lw=1.4, zorder=16))
+    ax.text(bx, by, str(num), ha='center', va='center', fontsize=11,
+            color='white', fontweight='bold', zorder=17)
+
+Zc = '#1a252f'
+# block-body vertical extents
+yb_lo = y0(24) - 0.75
+yb_24 = B['e1a']['yTop'] + 0.15
+yb_btl = B['btla']['yTop'] + 0.15
+
+# ① Physics-diagnostic inputs
+zone(B['inp']['x'] - 0.18, B['inp']['xR'] + 0.18, yb_lo, yb_24, 1, GRAY_I)
+# ③ Encoder
+zone(B['e1a']['x'] - 0.18, B['e3p']['xR'] + 0.22, yb_lo, yb_24, 3, BLUE)
+# ④ Bottleneck + satellite fusion
+zone(B['btla']['x'] - 0.18, B['bsat']['xR'] + 0.22, yb_lo, yb_btl + 0.3, 4, TEAL)
+# ⑤ Decoder
+zone(B['d3a']['x'] - 0.18, B['d1b']['xR'] + 0.22, yb_lo, yb_24, 5, GREEN)
+# ⑥ Head + soft aggregation
+zone(B['hd']['x'] - 0.20, AGG_X + 2.0, yb_lo, yb_24, 6, GOLD)
+
+# ② FiLM badge on the conditioning strip
+ax.add_patch(Circle((0.05, COND_Y), 0.30, facecolor=PURPLE, edgecolor='white',
+                    lw=1.4, zorder=16, clip_on=False))
+ax.text(0.05, COND_Y, '2', ha='center', va='center', fontsize=11,
+        color='white', fontweight='bold', zorder=17)
+# ⑦ Loss badge
+ax.add_patch(Circle((0.05, LY0), 0.30, facecolor='#1a252f', edgecolor='white',
+                    lw=1.4, zorder=16, clip_on=False))
+ax.text(0.05, LY0, '7', ha='center', va='center', fontsize=11,
+        color='white', fontweight='bold', zorder=17)
 
 plt.tight_layout(pad=0.3)
 out = 'results/figures/model.png'
-plt.savefig(out, dpi=160, bbox_inches='tight', facecolor=BG)
+plt.savefig(out, dpi=160, bbox_inches='tight', facecolor='white')
 plt.close()
 print(f'Saved → {out}')
