@@ -186,6 +186,8 @@ def main() -> None:
                     help="Years to sample (default: 2022)")
     ap.add_argument("--max-gb", type=float, default=18.0,
                     help="Stop once on-disk Parquet reaches this many GB (default 18)")
+    ap.add_argument("--months", nargs="+", type=int, default=None,
+                    help="Restrict to these months 1-12 (default: all available)")
     ap.add_argument("--seed",   type=int, default=42, help="Shuffle seed")
     ap.add_argument("--workers", type=int, default=6,
                     help="Concurrent download/convert workers (default 6)")
@@ -198,10 +200,13 @@ def main() -> None:
     session = _make_session()
     cruise_only = not args.no_filter
 
+    months = set(args.months) if args.months else None
     work: list[tuple[str, int]] = []
     for year in sorted(args.years):
         dates = list_snapshot_dates(session, year)
-        log.info("%d: %d snapshot dates available (%s … %s)",
+        if months:
+            dates = [d for d in dates if int(d.split("-")[1]) in months]
+        log.info("%d: %d snapshot dates selected (%s … %s)",
                  year, len(dates), dates[0] if dates else "-",
                  dates[-1] if dates else "-")
         for d in dates:
